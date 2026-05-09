@@ -55,3 +55,8 @@ MYSQL_RES *MysqlConn::query(const std::string &sql)
     // 返回查询结果集
     return mysql_store_result(conn_);
 }
+
+long long MysqlConn::getLastInsertId() const
+{
+    return static_cast<long long>(mysql_insert_id(conn_));
+}

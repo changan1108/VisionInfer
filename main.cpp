@@ -6,7 +6,7 @@
 
 // 引入各个业务模块的 Controller
 #include "controller/user/UserController.h"
-// #include "controller/video/VideoController.h"  // 以后引入
+#include "controller/video/VideoController.h"
 // #include "controller/inference/ModelController.h" // 以后引入
 
 int main()
@@ -19,7 +19,7 @@ int main()
 
     // 模块化路由注册：让各个 Controller 自己注册路由
     UserController::initRoutes(&router);
-    // VideoController::initRoutes(&router);
+    VideoController::initRoutes(&router);
     // ModelController::initRoutes(&router);
 
     std::cout << "[INFO] 所有业务模块路由初始化完毕。" << std::endl;

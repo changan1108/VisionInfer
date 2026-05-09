@@ -23,6 +23,9 @@ public:
     // 执行查询语句 (Select)
     MYSQL_RES *query(const std::string &sql);
 
+    // 获取最近一次插入的自增主键
+    long long getLastInsertId() const;
+
 private:
     MYSQL *conn_; // MySQL 连接句柄
 };

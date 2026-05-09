@@ -39,9 +39,12 @@ CREATE TABLE IF NOT EXISTS models (
 CREATE TABLE IF NOT EXISTS tasks (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     task_name VARCHAR(128) DEFAULT '',
+    task_type VARCHAR(64) NOT NULL,
     submitted_by VARCHAR(64) NOT NULL,
     input_video_path VARCHAR(255) NOT NULL,
     output_video_path VARCHAR(255) DEFAULT '',
+    frame_interval INT NOT NULL DEFAULT 1,
+    confidence_threshold DECIMAL(4,2) NOT NULL DEFAULT 0.50,
     status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
     result_summary TEXT,
     error_message TEXT,
@@ -50,6 +53,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at DATETIME NULL,
     finished_at DATETIME NULL,
     INDEX idx_tasks_status (status),
+    INDEX idx_tasks_type (task_type),
     INDEX idx_tasks_user (submitted_by),
     INDEX idx_tasks_created_at (created_at),
     CONSTRAINT fk_tasks_model_id FOREIGN KEY (model_id) REFERENCES models(id)
