@@ -1,3 +1,0 @@
-/home/chenwanyao/graduation_project/build/CMakeFiles/VisionInferenceServer.dir
-/home/chenwanyao/graduation_project/build/CMakeFiles/edit_cache.dir
-/home/chenwanyao/graduation_project/build/CMakeFiles/rebuild_cache.dir
