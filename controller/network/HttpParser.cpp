@@ -1,6 +1,20 @@
 #include "controller/network/HttpParser.h"
 #include <sstream>
 
+namespace
+{
+std::string trim(const std::string &input)
+{
+    std::size_t start = input.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos)
+    {
+        return "";
+    }
+    std::size_t end = input.find_last_not_of(" \t\r\n");
+    return input.substr(start, end - start + 1);
+}
+}
+
 HttpRequest HttpParser::parseRequest(const std::string &raw_request)
 {
     HttpRequest req;
@@ -48,6 +62,31 @@ HttpRequest HttpParser::parseRequest(const std::string &raw_request)
     {
         // 如果没有问号，直接当成路径
         req.path = raw_url;
+    }
+
+    size_t headers_end = raw_request.find("\r\n\r\n");
+    if (headers_end != std::string::npos)
+    {
+        std::size_t line_start = first_line_end + 2;
+        while (line_start < headers_end)
+        {
+            std::size_t line_end = raw_request.find("\r\n", line_start);
+            if (line_end == std::string::npos || line_end > headers_end)
+            {
+                break;
+            }
+
+            std::string line = raw_request.substr(line_start, line_end - line_start);
+            std::size_t colon_pos = line.find(':');
+            if (colon_pos != std::string::npos)
+            {
+                std::string key = trim(line.substr(0, colon_pos));
+                std::string value = trim(line.substr(colon_pos + 1));
+                req.headers[key] = value;
+            }
+
+            line_start = line_end + 2;
+        }
     }
 
     // 2. 找到 HTTP 报文中头部和 Body 的分界线（连续的两个回车换行 "\r\n\r\n"）

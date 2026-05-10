@@ -153,3 +153,43 @@ bool VideoUploadService::uploadFromServerPath(const VideoUploadRequest &request,
     result.file_size_bytes = getFileSize(result.stored_path);
     return true;
 }
+
+bool VideoUploadService::uploadFromBinary(const VideoUploadRequest &request, VideoUploadResult &result,
+                                          std::string &error_message)
+{
+    if (request.submitted_by.empty() || request.file_content.empty())
+    {
+        error_message = "submitted_by 和上传文件内容为必填项";
+        return false;
+    }
+
+    if (!createDirectoryIfNeeded(AppConfig::VIDEO_INPUT_DIR))
+    {
+        error_message = "创建视频输入目录失败";
+        return false;
+    }
+
+    result.original_filename = sanitizeFilename(request.original_filename.empty() ? "uploaded_video.mp4"
+                                                                                  : request.original_filename);
+    result.stored_filename = buildStoredFilename(result.original_filename);
+    result.stored_path = std::string(AppConfig::VIDEO_INPUT_DIR) + "/" + result.stored_filename;
+
+    std::ofstream output(result.stored_path.c_str(), std::ios::binary);
+    if (!output.is_open())
+    {
+        error_message = "无法创建目标视频文件";
+        return false;
+    }
+
+    output.write(request.file_content.data(), static_cast<std::streamsize>(request.file_content.size()));
+    output.flush();
+
+    if (!output.good())
+    {
+        error_message = "写入目标视频文件失败";
+        return false;
+    }
+
+    result.file_size_bytes = static_cast<long long>(request.file_content.size());
+    return true;
+}

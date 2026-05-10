@@ -8,6 +8,7 @@ struct VideoUploadRequest
     std::string submitted_by;
     std::string source_file_path;
     std::string original_filename;
+    std::string file_content;
 };
 
 struct VideoUploadResult
@@ -23,6 +24,8 @@ class VideoUploadService
 public:
     static bool uploadFromServerPath(const VideoUploadRequest &request, VideoUploadResult &result,
                                      std::string &error_message);
+    static bool uploadFromBinary(const VideoUploadRequest &request, VideoUploadResult &result,
+                                 std::string &error_message);
 };
 
 #endif // VIDEO_UPLOAD_SERVICE_H

@@ -5,6 +5,7 @@
 #include "service/video/VideoUploadService.h"
 
 #include <json/json.h>
+#include <map>
 #include <vector>
 
 namespace
@@ -25,6 +26,103 @@ bool isSupportedTaskType(const std::string &task_type)
     }
     return false;
 }
+
+std::string extractBoundary(const std::string &content_type)
+{
+    std::size_t boundary_pos = content_type.find("boundary=");
+    if (boundary_pos == std::string::npos)
+    {
+        return "";
+    }
+    return content_type.substr(boundary_pos + 9);
+}
+
+bool parseMultipartForm(const std::string &body, const std::string &boundary,
+                        std::map<std::string, std::string> &fields,
+                        std::string &file_name, std::string &file_content)
+{
+    std::string delimiter = "--" + boundary;
+    std::size_t cursor = 0;
+
+    while (true)
+    {
+        std::size_t part_begin = body.find(delimiter, cursor);
+        if (part_begin == std::string::npos)
+        {
+            break;
+        }
+
+        part_begin += delimiter.size();
+        if (part_begin + 2 <= body.size() && body.substr(part_begin, 2) == "--")
+        {
+            break;
+        }
+
+        if (part_begin + 2 > body.size() || body.substr(part_begin, 2) != "\r\n")
+        {
+            cursor = part_begin;
+            continue;
+        }
+        part_begin += 2;
+
+        std::size_t headers_end = body.find("\r\n\r\n", part_begin);
+        if (headers_end == std::string::npos)
+        {
+            return false;
+        }
+
+        std::string part_headers = body.substr(part_begin, headers_end - part_begin);
+        std::size_t content_begin = headers_end + 4;
+        std::size_t next_delimiter = body.find(delimiter, content_begin);
+        if (next_delimiter == std::string::npos)
+        {
+            return false;
+        }
+
+        std::size_t content_end = next_delimiter;
+        if (content_end >= 2 && body.substr(content_end - 2, 2) == "\r\n")
+        {
+            content_end -= 2;
+        }
+        std::string part_content = body.substr(content_begin, content_end - content_begin);
+
+        std::size_t name_pos = part_headers.find("name=\"");
+        if (name_pos == std::string::npos)
+        {
+            cursor = next_delimiter;
+            continue;
+        }
+
+        name_pos += 6;
+        std::size_t name_end = part_headers.find('"', name_pos);
+        if (name_end == std::string::npos)
+        {
+            return false;
+        }
+        std::string part_name = part_headers.substr(name_pos, name_end - name_pos);
+
+        std::size_t filename_pos = part_headers.find("filename=\"");
+        if (filename_pos != std::string::npos)
+        {
+            filename_pos += 10;
+            std::size_t filename_end = part_headers.find('"', filename_pos);
+            if (filename_end == std::string::npos)
+            {
+                return false;
+            }
+            file_name = part_headers.substr(filename_pos, filename_end - filename_pos);
+            file_content = part_content;
+        }
+        else
+        {
+            fields[part_name] = part_content;
+        }
+
+        cursor = next_delimiter;
+    }
+
+    return !file_content.empty();
+}
 }
 
 void VideoController::initRoutes(Router *router)
@@ -36,38 +134,77 @@ void VideoController::initRoutes(Router *router)
 
 void VideoController::handleUploadVideo(const HttpRequest &req, HttpResponse &res)
 {
-    Json::Value root;
-    Json::Reader reader;
-    if (!reader.parse(req.body, root))
+    std::string content_type;
+    std::unordered_map<std::string, std::string>::const_iterator header_it = req.headers.find("Content-Type");
+    if (header_it != req.headers.end())
     {
-        res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
-        return;
+        content_type = header_it->second;
     }
 
     VideoUploadRequest request;
-    request.submitted_by = root["submitted_by"].asString();
-    request.source_file_path = root["source_file_path"].asString();
-    request.original_filename = root.isMember("original_filename") ? root["original_filename"].asString() : "";
-
     VideoUploadResult result;
     std::string error_message;
-    if (!VideoUploadService::uploadFromServerPath(request, result, error_message))
+
+    if (content_type.find("multipart/form-data") != std::string::npos)
     {
-        res.statusCode = 400;
-        res.body = std::string("{\"code\": 400, \"msg\": \"") + error_message + "\"}";
-        return;
+        std::string boundary = extractBoundary(content_type);
+        if (boundary.empty())
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "multipart/form-data 缺少 boundary"})";
+            return;
+        }
+
+        std::map<std::string, std::string> fields;
+        if (!parseMultipartForm(req.body, boundary, fields, request.original_filename, request.file_content))
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "multipart/form-data 解析失败"})";
+            return;
+        }
+
+        request.submitted_by = fields["submitted_by"];
+        if (!VideoUploadService::uploadFromBinary(request, result, error_message))
+        {
+            res.statusCode = 400;
+            res.body = std::string("{\"code\": 400, \"msg\": \"") + error_message + "\"}";
+            return;
+        }
+    }
+    else
+    {
+        Json::Value root;
+        Json::Reader reader;
+        if (!reader.parse(req.body, root))
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
+            return;
+        }
+
+        request.submitted_by = root["submitted_by"].asString();
+        request.source_file_path = root["source_file_path"].asString();
+        request.original_filename = root.isMember("original_filename") ? root["original_filename"].asString() : "";
+
+        if (!VideoUploadService::uploadFromServerPath(request, result, error_message))
+        {
+            res.statusCode = 400;
+            res.body = std::string("{\"code\": 400, \"msg\": \"") + error_message + "\"}";
+            return;
+        }
     }
 
     Json::Value response;
     response["code"] = 200;
-    response["msg"] = "占位上传成功";
+    response["msg"] = "视频上传成功";
     response["data"]["submitted_by"] = request.submitted_by;
     response["data"]["original_filename"] = result.original_filename;
     response["data"]["stored_filename"] = result.stored_filename;
     response["data"]["stored_path"] = result.stored_path;
     response["data"]["file_size_bytes"] = Json::Int64(result.file_size_bytes);
-    response["data"]["upload_mode"] = "placeholder_json_copy";
+    response["data"]["upload_mode"] = content_type.find("multipart/form-data") != std::string::npos
+                                          ? "multipart_form_data"
+                                          : "placeholder_json_copy";
 
     Json::FastWriter writer;
     res.statusCode = 200;

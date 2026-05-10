@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cstring>
 #include <cerrno>
+#include <cstdlib>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -21,6 +22,7 @@ EpollServer::EpollServer(int port, Router *router)
 
 EpollServer::~EpollServer()
 {
+    request_buffers_.clear();
     if (listen_fd_ != -1)
         close(listen_fd_);
     if (epoll_fd_ != -1)
@@ -138,7 +140,7 @@ void EpollServer::handleNewConnection()
 
 void EpollServer::handleReadEvent(int client_fd)
 {
-    std::string raw_request;
+    std::string &raw_request = request_buffers_[client_fd];
     char buffer[4096];
 
     for (;;)
@@ -174,6 +176,11 @@ void EpollServer::handleReadEvent(int client_fd)
         return;
     }
 
+    if (!isRequestComplete(raw_request))
+    {
+        return;
+    }
+
     SystemMonitor::instance().incrementTotalRequests();
 
     // 核心链路：解析 -> 分发处理 -> 打包响应
@@ -203,7 +210,41 @@ void EpollServer::handleReadEvent(int client_fd)
 
 void EpollServer::closeClient(int client_fd)
 {
+    request_buffers_.erase(client_fd);
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, client_fd, NULL);
     close(client_fd);
     SystemMonitor::instance().decrementConnections();
+}
+
+bool EpollServer::isRequestComplete(const std::string &buffer) const
+{
+    std::size_t headers_end = buffer.find("\r\n\r\n");
+    if (headers_end == std::string::npos)
+    {
+        return false;
+    }
+
+    std::size_t content_length = 0;
+    std::size_t content_length_pos = buffer.find("Content-Length:");
+    if (content_length_pos != std::string::npos && content_length_pos < headers_end)
+    {
+        std::size_t value_begin = content_length_pos + std::string("Content-Length:").length();
+        while (value_begin < headers_end && (buffer[value_begin] == ' ' || buffer[value_begin] == '\t'))
+        {
+            ++value_begin;
+        }
+
+        std::size_t value_end = buffer.find("\r\n", value_begin);
+        if (value_end == std::string::npos || value_end > headers_end)
+        {
+            return false;
+        }
+
+        std::string value = buffer.substr(value_begin, value_end - value_begin);
+        content_length = static_cast<std::size_t>(std::strtoull(value.c_str(), NULL, 10));
+    }
+
+    std::size_t body_begin = headers_end + 4;
+    std::size_t body_size = buffer.size() - body_begin;
+    return body_size >= content_length;
 }
