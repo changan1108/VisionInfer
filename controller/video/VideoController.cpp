@@ -80,10 +80,11 @@ void VideoController::handleSubmitTask(const HttpRequest &req, HttpResponse &res
         return;
     }
 
-    if (!TaskService::submitTask(task))
+    std::string error_message;
+    if (!TaskService::submitTask(task, error_message))
     {
-        res.statusCode = 500;
-        res.body = R"({"code": 500, "msg": "任务提交失败"})";
+        res.statusCode = 400;
+        res.body = std::string("{\"code\": 400, \"msg\": \"") + error_message + "\"}";
         return;
     }
 
@@ -94,6 +95,7 @@ void VideoController::handleSubmitTask(const HttpRequest &req, HttpResponse &res
     response["data"]["status"] = task.status;
     response["data"]["task_name"] = task.task_name;
     response["data"]["task_type"] = task.task_type;
+    response["data"]["model_id"] = task.model_id;
 
     Json::FastWriter writer;
     res.statusCode = 200;

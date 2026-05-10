@@ -3,6 +3,7 @@
 #include "common/config/AppConfig.h"
 #include "common/concurrency/ThreadPool.h"
 #include "common/monitor/SystemMonitor.h"
+#include "dao/model/ModelDao.h"
 #include "dao/task/TaskDao.h"
 #include "service/video/VideoProcessor.h"
 
@@ -33,12 +34,31 @@ std::string buildDefaultTaskName(const TaskEntity &task)
 }
 }
 
-bool TaskService::submitTask(TaskEntity &task)
+bool TaskService::submitTask(TaskEntity &task, std::string &error_message)
 {
     if (task.submitted_by.empty() || task.input_video_path.empty() || task.task_type.empty())
     {
         std::cerr << "[TaskService ERROR] 任务提交失败：task_type、submitted_by 或 input_video_path 为空" << std::endl;
+        error_message = "task_type、submitted_by 和 input_video_path 为必填项";
         return false;
+    }
+
+    if (task.model_id > 0)
+    {
+        ModelEntity assigned_model;
+        if (!ModelDao::getModelById(task.model_id, assigned_model))
+        {
+            error_message = "指定的 model_id 不存在";
+            return false;
+        }
+    }
+    else
+    {
+        ModelEntity active_model;
+        if (ModelDao::getCurrentActiveModel(active_model))
+        {
+            task.model_id = active_model.id;
+        }
     }
 
     if (task.task_name.empty())
@@ -54,6 +74,7 @@ bool TaskService::submitTask(TaskEntity &task)
     if (!TaskDao::insertTask(task))
     {
         std::cerr << "[TaskService ERROR] 任务入库失败" << std::endl;
+        error_message = "任务入库失败";
         return false;
     }
 
@@ -68,6 +89,7 @@ bool TaskService::submitTask(TaskEntity &task)
         SystemMonitor::instance().decrementPendingTasks();
         TaskDao::markTaskFailed(task.id, "线程池调度失败");
         std::cerr << "[TaskService ERROR] 线程池调度失败: " << ex.what() << std::endl;
+        error_message = "线程池调度失败";
         return false;
     }
 
