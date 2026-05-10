@@ -10,6 +10,7 @@ public:
     static void initRoutes(Router *router);
 
 private:
+    static void handleUploadVideo(const HttpRequest &req, HttpResponse &res);
     static void handleSubmitTask(const HttpRequest &req, HttpResponse &res);
     static void handleGetTaskStatus(const HttpRequest &req, HttpResponse &res);
 };

@@ -2,6 +2,7 @@
 
 #include "entity/TaskEntity.h"
 #include "service/task/TaskService.h"
+#include "service/video/VideoUploadService.h"
 
 #include <json/json.h>
 #include <vector>
@@ -28,8 +29,49 @@ bool isSupportedTaskType(const std::string &task_type)
 
 void VideoController::initRoutes(Router *router)
 {
+    router->addRoute("POST", "/api/video/upload", VideoController::handleUploadVideo);
     router->addRoute("POST", "/api/task/submit", VideoController::handleSubmitTask);
     router->addRoute("GET", "/api/task/status", VideoController::handleGetTaskStatus);
+}
+
+void VideoController::handleUploadVideo(const HttpRequest &req, HttpResponse &res)
+{
+    Json::Value root;
+    Json::Reader reader;
+    if (!reader.parse(req.body, root))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
+        return;
+    }
+
+    VideoUploadRequest request;
+    request.submitted_by = root["submitted_by"].asString();
+    request.source_file_path = root["source_file_path"].asString();
+    request.original_filename = root.isMember("original_filename") ? root["original_filename"].asString() : "";
+
+    VideoUploadResult result;
+    std::string error_message;
+    if (!VideoUploadService::uploadFromServerPath(request, result, error_message))
+    {
+        res.statusCode = 400;
+        res.body = std::string("{\"code\": 400, \"msg\": \"") + error_message + "\"}";
+        return;
+    }
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "占位上传成功";
+    response["data"]["submitted_by"] = request.submitted_by;
+    response["data"]["original_filename"] = result.original_filename;
+    response["data"]["stored_filename"] = result.stored_filename;
+    response["data"]["stored_path"] = result.stored_path;
+    response["data"]["file_size_bytes"] = Json::Int64(result.file_size_bytes);
+    response["data"]["upload_mode"] = "placeholder_json_copy";
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
 }
 
 void VideoController::handleSubmitTask(const HttpRequest &req, HttpResponse &res)
