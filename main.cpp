@@ -6,6 +6,7 @@
 
 // 引入各个业务模块的 Controller
 #include "controller/inference/ModelController.h"
+#include "controller/system/SystemController.h"
 #include "controller/user/UserController.h"
 #include "controller/video/VideoController.h"
 
@@ -21,6 +22,7 @@ int main()
     UserController::initRoutes(&router);
     VideoController::initRoutes(&router);
     ModelController::initRoutes(&router);
+    SystemController::initRoutes(&router);
 
     std::cout << "[INFO] 所有业务模块路由初始化完毕。" << std::endl;
 
