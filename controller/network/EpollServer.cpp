@@ -201,8 +201,11 @@ void EpollServer::handleReadEvent(int client_fd)
     // Http解析模块将结果打包为 HTTP 字符串
     std::string raw_response = HttpParser::buildResponse(res);
 
-    // 将数据发送给客户端
-    send(client_fd, raw_response.c_str(), raw_response.length(), 0);
+    // 将数据完整发送给客户端
+    if (!sendAll(client_fd, raw_response))
+    {
+        std::cerr << "[EpollServer ERROR] 响应发送不完整，FD: " << client_fd << std::endl;
+    }
 
     // 当前先保持短连接，业务处理完成后立即关闭
     closeClient(client_fd);
@@ -247,4 +250,31 @@ bool EpollServer::isRequestComplete(const std::string &buffer) const
     std::size_t body_begin = headers_end + 4;
     std::size_t body_size = buffer.size() - body_begin;
     return body_size >= content_length;
+}
+
+bool EpollServer::sendAll(int client_fd, const std::string &data)
+{
+    std::size_t total_sent = 0;
+    while (total_sent < data.size())
+    {
+        ssize_t sent = send(client_fd,
+                            data.data() + total_sent,
+                            data.size() - total_sent,
+                            0);
+
+        if (sent > 0)
+        {
+            total_sent += static_cast<std::size_t>(sent);
+            continue;
+        }
+
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            continue;
+        }
+
+        return false;
+    }
+
+    return true;
 }

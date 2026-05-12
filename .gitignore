@@ -1,1 +1,14 @@
 build/
+
+# Keep the storage directory structure, but ignore generated/uploaded contents.
+storage/models/*
+!storage/models/.gitkeep
+
+storage/videos/input/*
+!storage/videos/input/.gitkeep
+
+storage/videos/output/*
+!storage/videos/output/.gitkeep
+
+storage/videos/frames/*
+!storage/videos/frames/.gitkeep

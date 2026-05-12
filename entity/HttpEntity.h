@@ -17,8 +17,10 @@ struct HttpRequest
 // HTTP 响应实体
 struct HttpResponse
 {
-    int statusCode = 200; // 默认状态码 200 代表成功
-    std::string body;     // 我们要返回给前端的 JSON 字符串
+    int statusCode = 200;                                  // 默认状态码 200 代表成功
+    std::string body;                                      // 返回给前端的响应体
+    std::string contentType = "application/json; charset=utf-8";
+    std::string contentDisposition;
 };
 
 #endif //_HTTP_ENTITY_H_

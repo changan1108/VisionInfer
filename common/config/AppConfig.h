@@ -17,6 +17,7 @@ constexpr const char *DB_PASSWORD = "123456";
 constexpr const char *MODEL_STORAGE_DIR = "/home/chenwanyao/graduation_project/storage/models";
 constexpr const char *VIDEO_INPUT_DIR = "/home/chenwanyao/graduation_project/storage/videos/input";
 constexpr const char *VIDEO_OUTPUT_DIR = "/home/chenwanyao/graduation_project/storage/videos/output";
+constexpr const char *VIDEO_FRAME_DIR = "/home/chenwanyao/graduation_project/storage/videos/frames";
 
 constexpr std::size_t DEFAULT_THREAD_POOL_SIZE = 4;
 }

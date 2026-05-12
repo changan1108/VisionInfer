@@ -11,6 +11,10 @@ struct TaskEntity
     std::string submitted_by;
     std::string input_video_path;
     std::string output_video_path;
+    double video_duration = 0.0;
+    int video_width = 0;
+    int video_height = 0;
+    double video_fps = 0.0;
     int frame_interval = 1;
     double confidence_threshold = 0.5;
     std::string status;

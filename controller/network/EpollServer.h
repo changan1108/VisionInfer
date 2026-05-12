@@ -45,6 +45,9 @@ private:
 
     // 判断当前缓冲区中的 HTTP 请求是否已经接收完整
     bool isRequestComplete(const std::string &buffer) const;
+
+    // 确保整个 HTTP 响应完整发送
+    bool sendAll(int client_fd, const std::string &data);
 };
 
 #endif // EPOLL_SERVER_H

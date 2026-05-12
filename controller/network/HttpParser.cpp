@@ -114,9 +114,13 @@ std::string HttpParser::buildResponse(const HttpResponse &res)
         response_str += "HTTP/1.1 " + std::to_string(res.statusCode) + " Error\r\n";
     }
 
-    // 2. 拼接必要的 Header，告诉前端我们返回的是 JSON 格式，以及数据的长度
-    response_str += "Content-Type: application/json; charset=utf-8\r\n";
+    // 2. 拼接必要的 Header，告诉前端我们返回的数据类型及长度
+    response_str += "Content-Type: " + res.contentType + "\r\n";
     response_str += "Content-Length: " + std::to_string(res.body.length()) + "\r\n";
+    if (!res.contentDisposition.empty())
+    {
+        response_str += "Content-Disposition: " + res.contentDisposition + "\r\n";
+    }
 
     // 3. 跨域支持 (CORS)：允许前端跨域访问我们的接口
     response_str += "Access-Control-Allow-Origin: *\r\n";

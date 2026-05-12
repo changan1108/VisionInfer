@@ -4,6 +4,7 @@
 #include "service/task/TaskService.h"
 #include "service/video/VideoUploadService.h"
 
+#include <fstream>
 #include <json/json.h>
 #include <map>
 #include <vector>
@@ -130,6 +131,7 @@ void VideoController::initRoutes(Router *router)
     router->addRoute("POST", "/api/video/upload", VideoController::handleUploadVideo);
     router->addRoute("POST", "/api/task/submit", VideoController::handleSubmitTask);
     router->addRoute("GET", "/api/task/status", VideoController::handleGetTaskStatus);
+    router->addRoute("GET", "/api/video/result", VideoController::handleGetResultVideo);
 }
 
 void VideoController::handleUploadVideo(const HttpRequest &req, HttpResponse &res)
@@ -320,6 +322,11 @@ void VideoController::handleGetTaskStatus(const HttpRequest &req, HttpResponse &
     response["data"]["submitted_by"] = task.submitted_by;
     response["data"]["input_video_path"] = task.input_video_path;
     response["data"]["output_video_path"] = task.output_video_path;
+    response["data"]["video_duration"] = task.video_duration;
+    response["data"]["video_width"] = task.video_width;
+    response["data"]["video_height"] = task.video_height;
+    response["data"]["video_fps"] = task.video_fps;
+    response["data"]["result_url"] = "/api/video/result?task_id=" + std::to_string(task.id);
     response["data"]["frame_interval"] = task.frame_interval;
     response["data"]["confidence_threshold"] = task.confidence_threshold;
     response["data"]["status"] = task.status;
@@ -333,4 +340,56 @@ void VideoController::handleGetTaskStatus(const HttpRequest &req, HttpResponse &
     Json::FastWriter writer;
     res.statusCode = 200;
     res.body = writer.write(response);
+}
+
+void VideoController::handleGetResultVideo(const HttpRequest &req, HttpResponse &res)
+{
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("task_id");
+    if (it == req.queryParams.end() || it->second.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "缺少 task_id 参数"})";
+        return;
+    }
+
+    long long task_id = 0;
+    try
+    {
+        task_id = std::stoll(it->second);
+    }
+    catch (...)
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "task_id 格式错误"})";
+        return;
+    }
+
+    TaskEntity task;
+    if (!TaskService::getTaskById(task_id, task))
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "任务不存在"})";
+        return;
+    }
+
+    if (task.output_video_path.empty())
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "任务结果文件不存在"})";
+        return;
+    }
+
+    std::ifstream input(task.output_video_path.c_str(), std::ios::binary);
+    if (!input.is_open())
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "无法打开结果视频文件"})";
+        return;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    res.statusCode = 200;
+    res.body = content;
+    res.contentType = "video/mp4";
+    res.contentDisposition = "inline";
 }

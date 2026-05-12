@@ -117,7 +117,7 @@ void TaskService::dispatchAsyncTask(const TaskEntity &task)
 
             if (success)
             {
-                TaskDao::markTaskCompleted(task.id, processed_task.output_video_path, processed_task.result_summary);
+                TaskDao::markTaskCompleted(processed_task);
                 SystemMonitor::instance().incrementCompletedTasks();
             }
             else
