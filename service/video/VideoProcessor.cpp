@@ -19,6 +19,7 @@ extern "C"
 
 #include <chrono>
 #include <cerrno>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -40,6 +41,13 @@ struct FrameExtractionResult
     int extracted_frame_count = 0;
     int total_detection_count = 0;
     std::string frame_directory;
+    std::string inference_model_name;
+    std::string inference_framework;
+    bool inference_model_file_exists = false;
+    bool real_inference_ran = false;
+    std::string inference_runtime_message;
+    bool result_video_generated = false;
+    std::string video_build_mode;
 };
 
 bool pathExists(const std::string &path)
@@ -135,6 +143,60 @@ bool copyFileBinary(const std::string &source_path, const std::string &target_pa
     return output.good();
 }
 
+std::string shellEscapeSingleQuotes(const std::string &input)
+{
+    std::string escaped;
+    escaped.reserve(input.size() + 8);
+    for (char ch : input)
+    {
+        if (ch == '\'')
+        {
+            escaped += "'\\''";
+        }
+        else
+        {
+            escaped += ch;
+        }
+    }
+    return escaped;
+}
+
+bool buildResultVideoFromFrames(const std::string &frame_directory,
+                                double fps,
+                                const std::string &output_path,
+                                std::string &error_message)
+{
+    if (frame_directory.empty() || output_path.empty())
+    {
+        error_message = "帧目录或输出路径为空";
+        return false;
+    }
+
+    double target_fps = fps > 0.0 ? fps : 25.0;
+    std::ostringstream fps_stream;
+    fps_stream.setf(std::ios::fixed);
+    fps_stream.precision(3);
+    fps_stream << target_fps;
+
+    std::string input_pattern = frame_directory + "/frame_%d.ppm";
+    std::ostringstream command;
+    // 这里直接复用系统 ffmpeg，把已经写盘的处理后帧序列重新编码成 mp4，
+    // 能用最小改动把“结果视频真实包含检测框”这条链路先落地。
+    command << "ffmpeg -y -loglevel error -framerate " << fps_stream.str()
+            << " -i '" << shellEscapeSingleQuotes(input_pattern) << "'"
+            << " -c:v libx264 -pix_fmt yuv420p"
+            << " '" << shellEscapeSingleQuotes(output_path) << "'";
+
+    int exit_code = std::system(command.str().c_str());
+    if (exit_code != 0 || !pathExists(output_path))
+    {
+        error_message = "ffmpeg 合成结果视频失败，exit_code=" + std::to_string(exit_code);
+        return false;
+    }
+
+    return true;
+}
+
 bool saveFrameAsPpm(const AVFrame *rgb_frame, int width, int height, const std::string &path)
 {
     std::ofstream output(path.c_str(), std::ios::binary);
@@ -200,7 +262,11 @@ bool readVideoMetadata(const std::string &path, VideoMetadata &metadata)
     return metadata.width > 0 && metadata.height > 0;
 }
 
-bool extractFrames(const std::string &path, int frame_interval, long long task_id, FrameExtractionResult &result)
+bool extractFrames(const std::string &path,
+                   int frame_interval,
+                   long long task_id,
+                   const InferenceModelContext &model_context,
+                   FrameExtractionResult &result)
 {
     if (frame_interval <= 0)
     {
@@ -313,6 +379,10 @@ bool extractFrames(const std::string &path, int frame_interval, long long task_i
     }
 
     result.frame_directory = buildFrameOutputDirectory(task_id);
+    // 提前记录本次任务绑定的模型上下文，这样即使视频没有成功抽出任何帧，任务摘要里也能看到模型信息。
+    result.inference_model_name = model_context.model_name;
+    result.inference_framework = model_context.framework;
+    result.inference_model_file_exists = model_context.file_exists;
     if (!createDirectoryIfNeeded(result.frame_directory))
     {
         av_freep(&rgb_frame->data[0]);
@@ -360,11 +430,16 @@ bool extractFrames(const std::string &path, int frame_interval, long long task_i
                 frame_buffer.data = rgb_frame->data[0];
 
                 InferenceResult inference_result;
-                if (!YoloInference::processFrame(frame_buffer, inference_result))
+                if (!YoloInference::processFrame(frame_buffer, model_context, inference_result))
                 {
                     return false;
                 }
                 total_detection_count += inference_result.detection_count;
+                result.inference_model_name = inference_result.model_name;
+                result.inference_framework = inference_result.model_framework;
+                result.inference_model_file_exists = model_context.file_exists;
+                result.real_inference_ran = inference_result.real_inference_ran;
+                result.inference_runtime_message = inference_result.runtime_message;
 
                 std::ostringstream frame_path;
                 frame_path << result.frame_directory << "/frame_" << extracted_index << ".ppm";
@@ -465,18 +540,41 @@ bool VideoProcessor::processTask(const TaskEntity &task, TaskEntity &out_result)
         return false;
     }
 
+    InferenceModelContext model_context;
+    std::string model_error_message;
+    if (!YoloInference::buildModelContext(task.model_id, model_context, model_error_message))
+    {
+        out_result.error_message = model_error_message;
+        return false;
+    }
+    model_context.confidence_threshold = static_cast<float>(task.confidence_threshold);
+
     FrameExtractionResult extraction_result;
-    if (!extractFrames(task.input_video_path, task.frame_interval, task.id, extraction_result))
+    if (!extractFrames(task.input_video_path, task.frame_interval, task.id, model_context, extraction_result))
     {
         return false;
     }
 
-    // 当前阶段先用“复制输入视频为结果视频”的方式占位，后续再替换为 FFmpeg/YOLO 真处理。
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    if (!copyFileBinary(task.input_video_path, out_result.output_video_path))
+    bool built_from_frames = false;
+    std::string build_video_error;
+    if (extraction_result.extracted_frame_count > 0)
     {
-        return false;
+        built_from_frames = buildResultVideoFromFrames(extraction_result.frame_directory,
+                                                       metadata.fps,
+                                                       out_result.output_video_path,
+                                                       build_video_error);
+    }
+    extraction_result.result_video_generated = built_from_frames;
+    extraction_result.video_build_mode = built_from_frames ? "ffmpeg_reencode" : "copy_fallback";
+
+    if (!built_from_frames)
+    {
+        if (!copyFileBinary(task.input_video_path, out_result.output_video_path))
+        {
+            return false;
+        }
     }
 
     long long output_size = getFileSize(out_result.output_video_path);
@@ -484,16 +582,34 @@ bool VideoProcessor::processTask(const TaskEntity &task, TaskEntity &out_result)
     out_result.video_width = metadata.width;
     out_result.video_height = metadata.height;
     out_result.video_fps = metadata.fps;
+    out_result.processed_frame_count = extraction_result.extracted_frame_count;
+    out_result.detection_count = extraction_result.total_detection_count;
+    out_result.real_inference_executed = extraction_result.real_inference_ran;
+    out_result.result_video_generated = built_from_frames;
+    out_result.used_model_name = extraction_result.inference_model_name;
+    out_result.used_model_framework = extraction_result.inference_framework;
+    out_result.video_build_mode = built_from_frames ? "ffmpeg_reencode" : "copy_fallback";
+    out_result.inference_runtime_message = extraction_result.inference_runtime_message;
 
     std::ostringstream oss;
-    oss << "占位处理完成，已生成结果文件和抽帧结果；类型=" << task.task_type
+    oss << (built_from_frames ? "处理完成，已基于处理后帧重建结果视频；类型=" :
+                                "处理完成，但结果视频暂时回退为原视频复制；类型=")
+        << task.task_type
         << "，时长=" << metadata.duration_seconds << " 秒"
         << "，分辨率=" << metadata.width << "x" << metadata.height
         << "，帧率=" << metadata.fps
         << "，抽帧间隔=" << task.frame_interval
         << "，抽帧数量=" << extraction_result.extracted_frame_count
         << "，帧输出目录=" << extraction_result.frame_directory
-        << "，帧已通过 YoloInference 占位服务完成单帧处理"
+        << "，推理模型=" << extraction_result.inference_model_name
+        << "，推理框架=" << extraction_result.inference_framework
+        << "，模型文件状态=" << (extraction_result.inference_model_file_exists ? "已找到" : "未找到，当前走占位模式")
+        << "，真实前向状态=" << (extraction_result.real_inference_ran ? "已执行" : "未执行")
+        << "，推理运行信息=" << extraction_result.inference_runtime_message
+        << "，模型加载信息=" << model_context.load_message
+        << "，结果视频生成方式=" << (built_from_frames ? "ffmpeg 帧序列重编码" : "原视频复制回退")
+        << (build_video_error.empty() ? "" : "，视频合成信息=" + build_video_error)
+        << "，帧已通过 YoloInference 完成单帧处理"
         << "，总检测框数量=" << extraction_result.total_detection_count
         << "，置信度阈值=" << task.confidence_threshold
         << "，结果文件大小=" << output_size << " 字节";

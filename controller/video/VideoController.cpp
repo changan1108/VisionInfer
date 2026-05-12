@@ -124,6 +124,44 @@ bool parseMultipartForm(const std::string &body, const std::string &boundary,
 
     return !file_content.empty();
 }
+
+Json::Value buildTaskJson(const TaskEntity &task)
+{
+    Json::Value item;
+    item["id"] = Json::Int64(task.id);
+    item["task_name"] = task.task_name;
+    item["task_type"] = task.task_type;
+    item["submitted_by"] = task.submitted_by;
+    item["input_video_path"] = task.input_video_path;
+    item["output_video_path"] = task.output_video_path;
+    item["video_duration"] = task.video_duration;
+    item["video_width"] = task.video_width;
+    item["video_height"] = task.video_height;
+    item["video_fps"] = task.video_fps;
+    item["result_url"] = task.output_video_path.empty() ? "" : "/api/video/result?task_id=" + std::to_string(task.id);
+    item["frame_interval"] = task.frame_interval;
+    item["confidence_threshold"] = task.confidence_threshold;
+    item["processed_frame_count"] = task.processed_frame_count;
+    item["detection_count"] = task.detection_count;
+    item["real_inference_executed"] = task.real_inference_executed;
+    item["result_video_generated"] = task.result_video_generated;
+    item["used_model_name"] = task.used_model_name;
+    item["used_model_framework"] = task.used_model_framework;
+    item["video_build_mode"] = task.video_build_mode;
+    item["inference_runtime_message"] = task.inference_runtime_message;
+    item["status"] = task.status;
+    item["result_summary"] = task.result_summary;
+    item["error_message"] = task.error_message;
+    item["model_id"] = task.model_id;
+    item["created_at"] = task.created_at;
+    item["started_at"] = task.started_at;
+    item["finished_at"] = task.finished_at;
+
+    // 这些字段方便前端直接做状态展示，不需要再解析 result_summary 文本。
+    item["has_result_video"] = !task.output_video_path.empty();
+    item["detection_summary_ready"] = !task.result_summary.empty();
+    return item;
+}
 }
 
 void VideoController::initRoutes(Router *router)
@@ -131,6 +169,8 @@ void VideoController::initRoutes(Router *router)
     router->addRoute("POST", "/api/video/upload", VideoController::handleUploadVideo);
     router->addRoute("POST", "/api/task/submit", VideoController::handleSubmitTask);
     router->addRoute("GET", "/api/task/status", VideoController::handleGetTaskStatus);
+    router->addRoute("GET", "/api/task/list", VideoController::handleListTasks);
+    router->addRoute("GET", "/api/task/stats", VideoController::handleGetTaskStats);
     router->addRoute("GET", "/api/video/result", VideoController::handleGetResultVideo);
 }
 
@@ -316,26 +356,99 @@ void VideoController::handleGetTaskStatus(const HttpRequest &req, HttpResponse &
     Json::Value response;
     response["code"] = 200;
     response["msg"] = "查询任务成功";
-    response["data"]["id"] = Json::Int64(task.id);
-    response["data"]["task_name"] = task.task_name;
-    response["data"]["task_type"] = task.task_type;
-    response["data"]["submitted_by"] = task.submitted_by;
-    response["data"]["input_video_path"] = task.input_video_path;
-    response["data"]["output_video_path"] = task.output_video_path;
-    response["data"]["video_duration"] = task.video_duration;
-    response["data"]["video_width"] = task.video_width;
-    response["data"]["video_height"] = task.video_height;
-    response["data"]["video_fps"] = task.video_fps;
-    response["data"]["result_url"] = "/api/video/result?task_id=" + std::to_string(task.id);
-    response["data"]["frame_interval"] = task.frame_interval;
-    response["data"]["confidence_threshold"] = task.confidence_threshold;
-    response["data"]["status"] = task.status;
-    response["data"]["result_summary"] = task.result_summary;
-    response["data"]["error_message"] = task.error_message;
-    response["data"]["model_id"] = task.model_id;
-    response["data"]["created_at"] = task.created_at;
-    response["data"]["started_at"] = task.started_at;
-    response["data"]["finished_at"] = task.finished_at;
+    response["data"] = buildTaskJson(task);
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
+}
+
+void VideoController::handleListTasks(const HttpRequest &req, HttpResponse &res)
+{
+    TaskListFilter filter;
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("limit");
+    if (it != req.queryParams.end() && !it->second.empty())
+    {
+        try
+        {
+            filter.limit = std::stoi(it->second);
+        }
+        catch (...)
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "limit 参数格式错误"})";
+            return;
+        }
+    }
+
+    if (filter.limit <= 0 || filter.limit > 100)
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "limit 取值范围必须在 1 到 100 之间"})";
+        return;
+    }
+
+    it = req.queryParams.find("status");
+    if (it != req.queryParams.end())
+    {
+        filter.status = it->second;
+    }
+
+    it = req.queryParams.find("task_type");
+    if (it != req.queryParams.end())
+    {
+        filter.task_type = it->second;
+    }
+
+    it = req.queryParams.find("submitted_by");
+    if (it != req.queryParams.end())
+    {
+        filter.submitted_by = it->second;
+    }
+
+    std::vector<TaskEntity> tasks = TaskService::listTasks(filter);
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "查询任务列表成功";
+    response["data"]["total"] = static_cast<Json::UInt64>(tasks.size());
+    response["data"]["limit"] = filter.limit;
+    response["data"]["filters"]["status"] = filter.status;
+    response["data"]["filters"]["task_type"] = filter.task_type;
+    response["data"]["filters"]["submitted_by"] = filter.submitted_by;
+
+    for (std::size_t i = 0; i < tasks.size(); ++i)
+    {
+        response["data"]["items"].append(buildTaskJson(tasks[i]));
+    }
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
+}
+
+void VideoController::handleGetTaskStats(const HttpRequest &req, HttpResponse &res)
+{
+    (void)req;
+
+    TaskStats stats = TaskService::getTaskStats();
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "查询任务统计成功";
+    response["data"]["total"] = stats.total;
+    response["data"]["result_video_generated"] = stats.result_video_generated;
+    response["data"]["real_inference_executed"] = stats.real_inference_executed;
+
+    for (std::map<std::string, int>::const_iterator it = stats.by_status.begin(); it != stats.by_status.end(); ++it)
+    {
+        response["data"]["by_status"][it->first] = it->second;
+    }
+
+    for (std::map<std::string, int>::const_iterator it = stats.by_task_type.begin(); it != stats.by_task_type.end(); ++it)
+    {
+        response["data"]["by_task_type"][it->first] = it->second;
+    }
 
     Json::FastWriter writer;
     res.statusCode = 200;

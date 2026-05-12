@@ -156,3 +156,49 @@ bool ModelDao::activateModel(int model_id)
     std::string sql = "UPDATE models SET is_active = 1 WHERE id = " + std::to_string(model_id) + ";";
     return db.update(sql);
 }
+
+ModelStats ModelDao::getModelStats()
+{
+    ModelStats stats;
+
+    MysqlConn db;
+    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
+                    AppConfig::DB_HOST, AppConfig::DB_PORT))
+    {
+        return stats;
+    }
+
+    MYSQL_RES *overview_res = db.query("SELECT COUNT(*), SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) FROM models;");
+    if (overview_res != nullptr)
+    {
+        MYSQL_ROW row = mysql_fetch_row(overview_res);
+        if (row != nullptr)
+        {
+            stats.total = row[0] ? std::stoi(row[0]) : 0;
+            stats.active_count = row[1] ? std::stoi(row[1]) : 0;
+        }
+        mysql_free_result(overview_res);
+    }
+
+    MYSQL_RES *framework_res = db.query("SELECT framework, COUNT(*) FROM models GROUP BY framework;");
+    if (framework_res != nullptr)
+    {
+        MYSQL_ROW row = nullptr;
+        while ((row = mysql_fetch_row(framework_res)) != nullptr)
+        {
+            std::string framework = row[0] ? row[0] : "";
+            int count = row[1] ? std::stoi(row[1]) : 0;
+            stats.by_framework[framework] = count;
+        }
+        mysql_free_result(framework_res);
+    }
+
+    ModelEntity active_model;
+    if (getCurrentActiveModel(active_model))
+    {
+        stats.current_active_model = active_model;
+        stats.has_active_model = true;
+    }
+
+    return stats;
+}

@@ -13,6 +13,7 @@ public:
     static bool getModelById(int model_id, ModelEntity &out_model);
     static bool getCurrentActiveModel(ModelEntity &out_model);
     static std::vector<ModelEntity> listModels();
+    static ModelStats getModelStats();
 };
 
 #endif // MODEL_SERVICE_H

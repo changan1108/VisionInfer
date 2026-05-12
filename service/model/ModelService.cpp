@@ -71,3 +71,8 @@ std::vector<ModelEntity> ModelService::listModels()
 {
     return ModelDao::getAllModels();
 }
+
+ModelStats ModelService::getModelStats()
+{
+    return ModelDao::getModelStats();
+}

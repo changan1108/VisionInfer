@@ -1,6 +1,7 @@
 #ifndef MODEL_ENTITY_H
 #define MODEL_ENTITY_H
 
+#include <map>
 #include <string>
 
 struct ModelEntity
@@ -13,6 +14,15 @@ struct ModelEntity
     std::string uploaded_by;
     std::string uploaded_at;
     std::string updated_at;
+};
+
+struct ModelStats
+{
+    int total = 0;
+    int active_count = 0;
+    std::map<std::string, int> by_framework;
+    ModelEntity current_active_model;
+    bool has_active_model = false;
 };
 
 #endif // MODEL_ENTITY_H

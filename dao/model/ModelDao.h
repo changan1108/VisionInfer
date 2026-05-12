@@ -14,6 +14,7 @@ public:
     static std::vector<ModelEntity> getAllModels();
     static bool deactivateAllModels();
     static bool activateModel(int model_id);
+    static ModelStats getModelStats();
 };
 
 #endif // MODEL_DAO_H

@@ -101,12 +101,23 @@ bool TaskService::getTaskById(long long task_id, TaskEntity &out_task)
     return TaskDao::getTaskById(task_id, out_task);
 }
 
+std::vector<TaskEntity> TaskService::listTasks(const TaskListFilter &filter)
+{
+    return TaskDao::listTasks(filter);
+}
+
+TaskStats TaskService::getTaskStats()
+{
+    return TaskDao::getTaskStats();
+}
+
 void TaskService::dispatchAsyncTask(const TaskEntity &task)
 {
     getTaskThreadPool().enqueue([task]()
                                 {
         SystemMonitor::instance().decrementPendingTasks();
         SystemMonitor::instance().incrementActiveThreads();
+        auto started_at = std::chrono::steady_clock::now();
 
         try
         {
@@ -137,5 +148,9 @@ void TaskService::dispatchAsyncTask(const TaskEntity &task)
             SystemMonitor::instance().incrementFailedTasks();
         }
 
+        auto finished_at = std::chrono::steady_clock::now();
+        std::uint64_t duration_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(finished_at - started_at).count());
+        SystemMonitor::instance().recordTaskDuration(duration_ms);
         SystemMonitor::instance().decrementActiveThreads(); });
 }
