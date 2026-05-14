@@ -10,6 +10,7 @@ public:
     static void initRoutes(Router *router);
 
 private:
+    static void handleHeartbeat(const HttpRequest &req, HttpResponse &res);
     static void handleGetSystemStatus(const HttpRequest &req, HttpResponse &res);
     static void handleGetSystemOverview(const HttpRequest &req, HttpResponse &res);
 };

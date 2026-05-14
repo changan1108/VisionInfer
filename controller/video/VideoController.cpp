@@ -2,10 +2,13 @@
 
 #include "entity/TaskEntity.h"
 #include "service/task/TaskService.h"
+#include "service/video/VideoLibraryService.h"
 #include "service/video/VideoUploadService.h"
 
 #include <fstream>
 #include <json/json.h>
+#include <algorithm>
+#include <cctype>
 #include <map>
 #include <vector>
 
@@ -36,6 +39,50 @@ std::string extractBoundary(const std::string &content_type)
         return "";
     }
     return content_type.substr(boundary_pos + 9);
+}
+
+std::string toLowerCopy(const std::string &input)
+{
+    std::string lowered = input;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char ch)
+                   { return static_cast<char>(std::tolower(ch)); });
+    return lowered;
+}
+
+std::string getHeaderIgnoreCase(const std::unordered_map<std::string, std::string> &headers,
+                                const std::string &target_key)
+{
+    std::string lowered_target = toLowerCopy(target_key);
+    for (std::unordered_map<std::string, std::string>::const_iterator it = headers.begin();
+         it != headers.end(); ++it)
+    {
+        if (toLowerCopy(it->first) == lowered_target)
+        {
+            return it->second;
+        }
+    }
+    return "";
+}
+
+bool parseJsonObjectBody(const std::string &body, Json::Value &root, HttpResponse &res)
+{
+    Json::Reader reader;
+    if (!reader.parse(body, root))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
+        return false;
+    }
+
+    if (!root.isObject())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "JSON 请求体必须是对象"})";
+        return false;
+    }
+
+    return true;
 }
 
 bool parseMultipartForm(const std::string &body, const std::string &boundary,
@@ -133,6 +180,7 @@ Json::Value buildTaskJson(const TaskEntity &task)
     item["task_type"] = task.task_type;
     item["submitted_by"] = task.submitted_by;
     item["input_video_path"] = task.input_video_path;
+    item["input_video_id"] = task.input_video_id;
     item["output_video_path"] = task.output_video_path;
     item["video_duration"] = task.video_duration;
     item["video_width"] = task.video_width;
@@ -162,11 +210,45 @@ Json::Value buildTaskJson(const TaskEntity &task)
     item["detection_summary_ready"] = !task.result_summary.empty();
     return item;
 }
+
+Json::Value buildVideoJson(const VideoEntity &video)
+{
+    Json::Value item;
+    item["id"] = video.id;
+    item["submitted_by"] = video.submitted_by;
+    item["original_filename"] = video.original_filename;
+    item["stored_filename"] = video.stored_filename;
+    item["stored_path"] = video.stored_path;
+    item["file_size_bytes"] = Json::Int64(video.file_size_bytes);
+    item["duration"] = video.duration;
+    item["width"] = video.width;
+    item["height"] = video.height;
+    item["fps"] = video.fps;
+    item["uploaded_at"] = video.uploaded_at;
+    item["preview_url"] = "/api/video/preview?id=" + std::to_string(video.id);
+    return item;
+}
+
+bool parsePositiveInt(const std::string &text, int &out_value)
+{
+    try
+    {
+        out_value = std::stoi(text);
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return out_value > 0;
+}
 }
 
 void VideoController::initRoutes(Router *router)
 {
     router->addRoute("POST", "/api/video/upload", VideoController::handleUploadVideo);
+    router->addRoute("GET", "/api/video/list", VideoController::handleListVideos);
+    router->addRoute("GET", "/api/video/info", VideoController::handleGetVideoInfo);
+    router->addRoute("GET", "/api/video/preview", VideoController::handlePreviewVideo);
     router->addRoute("POST", "/api/task/submit", VideoController::handleSubmitTask);
     router->addRoute("GET", "/api/task/status", VideoController::handleGetTaskStatus);
     router->addRoute("GET", "/api/task/list", VideoController::handleListTasks);
@@ -176,12 +258,7 @@ void VideoController::initRoutes(Router *router)
 
 void VideoController::handleUploadVideo(const HttpRequest &req, HttpResponse &res)
 {
-    std::string content_type;
-    std::unordered_map<std::string, std::string>::const_iterator header_it = req.headers.find("Content-Type");
-    if (header_it != req.headers.end())
-    {
-        content_type = header_it->second;
-    }
+    std::string content_type = getHeaderIgnoreCase(req.headers, "Content-Type");
 
     VideoUploadRequest request;
     VideoUploadResult result;
@@ -216,11 +293,8 @@ void VideoController::handleUploadVideo(const HttpRequest &req, HttpResponse &re
     else
     {
         Json::Value root;
-        Json::Reader reader;
-        if (!reader.parse(req.body, root))
+        if (!parseJsonObjectBody(req.body, root, res))
         {
-            res.statusCode = 400;
-            res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
             return;
         }
 
@@ -236,14 +310,27 @@ void VideoController::handleUploadVideo(const HttpRequest &req, HttpResponse &re
         }
     }
 
+    if (!VideoLibraryService::registerUploadedVideo(request, result, error_message))
+    {
+        res.statusCode = 500;
+        res.body = std::string("{\"code\": 500, \"msg\": \"") + error_message + "\"}";
+        return;
+    }
+
     Json::Value response;
     response["code"] = 200;
     response["msg"] = "视频上传成功";
+    response["data"]["video_id"] = result.video_id;
     response["data"]["submitted_by"] = request.submitted_by;
     response["data"]["original_filename"] = result.original_filename;
     response["data"]["stored_filename"] = result.stored_filename;
     response["data"]["stored_path"] = result.stored_path;
     response["data"]["file_size_bytes"] = Json::Int64(result.file_size_bytes);
+    response["data"]["duration"] = result.duration;
+    response["data"]["width"] = result.width;
+    response["data"]["height"] = result.height;
+    response["data"]["fps"] = result.fps;
+    response["data"]["preview_url"] = "/api/video/preview?id=" + std::to_string(result.video_id);
     response["data"]["upload_mode"] = content_type.find("multipart/form-data") != std::string::npos
                                           ? "multipart_form_data"
                                           : "placeholder_json_copy";
@@ -256,11 +343,8 @@ void VideoController::handleUploadVideo(const HttpRequest &req, HttpResponse &re
 void VideoController::handleSubmitTask(const HttpRequest &req, HttpResponse &res)
 {
     Json::Value root;
-    Json::Reader reader;
-    if (!reader.parse(req.body, root))
+    if (!parseJsonObjectBody(req.body, root, res))
     {
-        res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
         return;
     }
 
@@ -269,14 +353,27 @@ void VideoController::handleSubmitTask(const HttpRequest &req, HttpResponse &res
     task.task_type = root["task_type"].asString();
     task.submitted_by = root["submitted_by"].asString();
     task.input_video_path = root["input_video_path"].asString();
+    task.input_video_id = root.isMember("input_video_id") ? root["input_video_id"].asInt() : 0;
     task.frame_interval = root.isMember("frame_interval") ? root["frame_interval"].asInt() : 1;
     task.confidence_threshold = root.isMember("confidence_threshold") ? root["confidence_threshold"].asDouble() : 0.5;
     task.model_id = root.isMember("model_id") ? root["model_id"].asInt() : 0;
 
+    if (task.input_video_id > 0 && task.input_video_path.empty())
+    {
+        std::string resolved_path;
+        if (!VideoLibraryService::resolveVideoPathById(task.input_video_id, resolved_path))
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "input_video_id 不存在"})";
+            return;
+        }
+        task.input_video_path = resolved_path;
+    }
+
     if (task.submitted_by.empty() || task.input_video_path.empty() || task.task_type.empty())
     {
         res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "task_type、submitted_by 和 input_video_path 为必填项"})";
+        res.body = R"({"code": 400, "msg": "task_type、submitted_by 和 input_video_path/input_video_id 为必填项"})";
         return;
     }
 
@@ -316,6 +413,7 @@ void VideoController::handleSubmitTask(const HttpRequest &req, HttpResponse &res
     response["data"]["status"] = task.status;
     response["data"]["task_name"] = task.task_name;
     response["data"]["task_type"] = task.task_type;
+    response["data"]["input_video_id"] = task.input_video_id;
     response["data"]["model_id"] = task.model_id;
 
     Json::FastWriter writer;
@@ -453,6 +551,130 @@ void VideoController::handleGetTaskStats(const HttpRequest &req, HttpResponse &r
     Json::FastWriter writer;
     res.statusCode = 200;
     res.body = writer.write(response);
+}
+
+void VideoController::handleListVideos(const HttpRequest &req, HttpResponse &res)
+{
+    VideoListFilter filter;
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("limit");
+    if (it != req.queryParams.end() && !it->second.empty())
+    {
+        if (!parsePositiveInt(it->second, filter.limit) || filter.limit > 100)
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "limit 取值范围必须在 1 到 100 之间"})";
+            return;
+        }
+    }
+
+    it = req.queryParams.find("submitted_by");
+    if (it != req.queryParams.end())
+    {
+        filter.submitted_by = it->second;
+    }
+
+    it = req.queryParams.find("keyword");
+    if (it != req.queryParams.end())
+    {
+        filter.keyword = it->second;
+    }
+
+    std::vector<VideoEntity> videos = VideoLibraryService::listVideos(filter);
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "查询视频列表成功";
+    response["data"]["total"] = static_cast<Json::UInt64>(videos.size());
+    response["data"]["limit"] = filter.limit;
+    response["data"]["filters"]["submitted_by"] = filter.submitted_by;
+    response["data"]["filters"]["keyword"] = filter.keyword;
+    for (std::size_t i = 0; i < videos.size(); ++i)
+    {
+        response["data"]["items"].append(buildVideoJson(videos[i]));
+    }
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
+}
+
+void VideoController::handleGetVideoInfo(const HttpRequest &req, HttpResponse &res)
+{
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("id");
+    if (it == req.queryParams.end() || it->second.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "缺少视频 id 参数"})";
+        return;
+    }
+
+    int video_id = 0;
+    if (!parsePositiveInt(it->second, video_id))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "视频 id 格式错误"})";
+        return;
+    }
+
+    VideoInfoView info;
+    if (!VideoLibraryService::getVideoInfo(video_id, info))
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "视频不存在"})";
+        return;
+    }
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "查询视频详情成功";
+    response["data"] = buildVideoJson(info.video);
+    response["data"]["has_task_usage"] = info.has_task_usage;
+    response["data"]["task_usage_count"] = info.task_usage_count;
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
+}
+
+void VideoController::handlePreviewVideo(const HttpRequest &req, HttpResponse &res)
+{
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("id");
+    if (it == req.queryParams.end() || it->second.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "缺少视频 id 参数"})";
+        return;
+    }
+
+    int video_id = 0;
+    if (!parsePositiveInt(it->second, video_id))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "视频 id 格式错误"})";
+        return;
+    }
+
+    std::string video_path;
+    if (!VideoLibraryService::resolveVideoPathById(video_id, video_path))
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "视频不存在"})";
+        return;
+    }
+
+    std::ifstream input(video_path.c_str(), std::ios::binary);
+    if (!input.is_open())
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "无法打开原始视频文件"})";
+        return;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    res.statusCode = 200;
+    res.body = content;
+    res.contentType = "video/mp4";
+    res.contentDisposition = "inline";
 }
 
 void VideoController::handleGetResultVideo(const HttpRequest &req, HttpResponse &res)

@@ -36,12 +36,31 @@ CREATE TABLE IF NOT EXISTS models (
     UNIQUE KEY uniq_model_name (model_name)
 );
 
+CREATE TABLE IF NOT EXISTS videos (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    submitted_by VARCHAR(64) NOT NULL,
+    original_filename VARCHAR(255) NOT NULL,
+    stored_filename VARCHAR(255) NOT NULL,
+    stored_path VARCHAR(255) NOT NULL,
+    file_size_bytes BIGINT NOT NULL DEFAULT 0,
+    duration DOUBLE NOT NULL DEFAULT 0,
+    width INT NOT NULL DEFAULT 0,
+    height INT NOT NULL DEFAULT 0,
+    fps DOUBLE NOT NULL DEFAULT 0,
+    uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_videos_stored_filename (stored_filename),
+    UNIQUE KEY uniq_videos_stored_path (stored_path),
+    INDEX idx_videos_submitted_by (submitted_by),
+    INDEX idx_videos_uploaded_at (uploaded_at)
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     task_name VARCHAR(128) DEFAULT '',
     task_type VARCHAR(64) NOT NULL,
     submitted_by VARCHAR(64) NOT NULL,
     input_video_path VARCHAR(255) NOT NULL,
+    input_video_id INT NULL,
     output_video_path VARCHAR(255) DEFAULT '',
     video_duration DOUBLE NOT NULL DEFAULT 0,
     video_width INT NOT NULL DEFAULT 0,
@@ -68,5 +87,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     INDEX idx_tasks_type (task_type),
     INDEX idx_tasks_user (submitted_by),
     INDEX idx_tasks_created_at (created_at),
+    INDEX idx_tasks_input_video_id (input_video_id),
+    CONSTRAINT fk_tasks_input_video_id FOREIGN KEY (input_video_id) REFERENCES videos(id),
     CONSTRAINT fk_tasks_model_id FOREIGN KEY (model_id) REFERENCES models(id)
 );

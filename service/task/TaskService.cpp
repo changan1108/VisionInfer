@@ -5,6 +5,7 @@
 #include "common/monitor/SystemMonitor.h"
 #include "dao/model/ModelDao.h"
 #include "dao/task/TaskDao.h"
+#include "dao/video/VideoDao.h"
 #include "service/video/VideoProcessor.h"
 
 #include <exception>
@@ -61,6 +62,15 @@ bool TaskService::submitTask(TaskEntity &task, std::string &error_message)
         }
     }
 
+    if (task.input_video_id <= 0)
+    {
+        VideoEntity existing_video;
+        if (VideoDao::getVideoByStoredPath(task.input_video_path, existing_video))
+        {
+            task.input_video_id = existing_video.id;
+        }
+    }
+
     if (task.task_name.empty())
     {
         task.task_name = buildDefaultTaskName(task);
@@ -113,11 +123,15 @@ TaskStats TaskService::getTaskStats()
 
 void TaskService::dispatchAsyncTask(const TaskEntity &task)
 {
-    getTaskThreadPool().enqueue([task]()
+    auto queued_at = std::chrono::steady_clock::now();
+    getTaskThreadPool().enqueue([task, queued_at]()
                                 {
+        auto started_at = std::chrono::steady_clock::now();
+        std::uint64_t queue_wait_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(started_at - queued_at).count());
+        SystemMonitor::instance().recordTaskQueueWait(queue_wait_ms);
         SystemMonitor::instance().decrementPendingTasks();
         SystemMonitor::instance().incrementActiveThreads();
-        auto started_at = std::chrono::steady_clock::now();
 
         try
         {
@@ -151,6 +165,14 @@ void TaskService::dispatchAsyncTask(const TaskEntity &task)
         auto finished_at = std::chrono::steady_clock::now();
         std::uint64_t duration_ms = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(finished_at - started_at).count());
+        if (duration_ms > 0)
+        {
+            TaskEntity completed_task;
+            if (TaskDao::getTaskById(task.id, completed_task))
+            {
+                SystemMonitor::instance().recordTaskFrames(completed_task.processed_frame_count, duration_ms);
+            }
+        }
         SystemMonitor::instance().recordTaskDuration(duration_ms);
         SystemMonitor::instance().decrementActiveThreads(); });
 }

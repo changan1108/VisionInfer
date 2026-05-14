@@ -6,6 +6,29 @@
 #include <algorithm>
 #include <cctype>
 
+namespace
+{
+bool parseJsonObjectBody(const std::string &body, Json::Value &root, HttpResponse &res)
+{
+    Json::Reader reader;
+    if (!reader.parse(body, root))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
+        return false;
+    }
+
+    if (!root.isObject())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "JSON 请求体必须是对象"})";
+        return false;
+    }
+
+    return true;
+}
+}
+
 // User模块的路由注册(使用router)
 void UserController::initRoutes(Router *router)
 {
@@ -26,12 +49,8 @@ void UserController::initRoutes(Router *router)
 void UserController::handleAddUser(const HttpRequest &req, HttpResponse &res)
 {
     Json::Value root;
-    Json::Reader reader;
-
-    if (!reader.parse(req.body, root))
+    if (!parseJsonObjectBody(req.body, root, res))
     {
-        res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
         return;
     }
 
@@ -98,12 +117,8 @@ void UserController::handleAddUser(const HttpRequest &req, HttpResponse &res)
 void UserController::handleLogin(const HttpRequest &req, HttpResponse &res)
 {
     Json::Value root;
-    Json::Reader reader;
-
-    if (!reader.parse(req.body, root))
+    if (!parseJsonObjectBody(req.body, root, res))
     {
-        res.statusCode = 400;
-        res.body = R"({"code":400, "msg":"JSON错误"})";
         return;
     }
 
@@ -192,12 +207,8 @@ void UserController::handleGetUserInfo(const HttpRequest &req, HttpResponse &res
 void UserController::handleUpdateUser(const HttpRequest &req, HttpResponse &res)
 {
     Json::Value root;
-    Json::Reader reader;
-
-    if (!reader.parse(req.body, root))
+    if (!parseJsonObjectBody(req.body, root, res))
     {
-        res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
         return;
     }
 

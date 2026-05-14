@@ -10,7 +10,7 @@ public:
     static void initRoutes(Router *router);
 
 private:
-    static void handleAddModel(const HttpRequest &req, HttpResponse &res);
+    static void handleUploadModel(const HttpRequest &req, HttpResponse &res);
     static void handleSwitchModel(const HttpRequest &req, HttpResponse &res);
     static void handleGetCurrentModel(const HttpRequest &req, HttpResponse &res);
     static void handleListModels(const HttpRequest &req, HttpResponse &res);

@@ -11,6 +11,7 @@ struct TaskEntity
     std::string task_type;
     std::string submitted_by;
     std::string input_video_path;
+    int input_video_id = 0;
     std::string output_video_path;
     double video_duration = 0.0;
     int video_width = 0;

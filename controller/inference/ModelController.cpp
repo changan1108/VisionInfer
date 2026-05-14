@@ -1,13 +1,164 @@
 #include "controller/inference/ModelController.h"
 
+#include <algorithm>
+#include <cctype>
 #include <json/json.h>
+#include <map>
 #include <vector>
 
 #include "entity/ModelEntity.h"
 #include "service/model/ModelService.h"
+#include "service/model/ModelUploadService.h"
 
 namespace
 {
+bool parseJsonObjectBody(const std::string &body, Json::Value &root, HttpResponse &res)
+{
+    Json::Reader reader;
+    if (!reader.parse(body, root))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
+        return false;
+    }
+
+    if (!root.isObject())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "JSON 请求体必须是对象"})";
+        return false;
+    }
+
+    return true;
+}
+
+std::string toLowerCopy(const std::string &input)
+{
+    std::string lowered = input;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char ch)
+                   { return static_cast<char>(std::tolower(ch)); });
+    return lowered;
+}
+
+std::string getHeaderIgnoreCase(const std::unordered_map<std::string, std::string> &headers,
+                                const std::string &target_key)
+{
+    std::string lowered_target = toLowerCopy(target_key);
+    for (std::unordered_map<std::string, std::string>::const_iterator it = headers.begin();
+         it != headers.end(); ++it)
+    {
+        if (toLowerCopy(it->first) == lowered_target)
+        {
+            return it->second;
+        }
+    }
+    return "";
+}
+
+std::string extractBoundary(const std::string &content_type)
+{
+    std::size_t boundary_pos = content_type.find("boundary=");
+    if (boundary_pos == std::string::npos)
+    {
+        return "";
+    }
+    return content_type.substr(boundary_pos + 9);
+}
+
+bool parseMultipartForm(const std::string &body, const std::string &boundary,
+                        std::map<std::string, std::string> &fields,
+                        std::string &file_name, std::string &file_content)
+{
+    std::string delimiter = "--" + boundary;
+    std::size_t cursor = 0;
+
+    while (true)
+    {
+        std::size_t part_begin = body.find(delimiter, cursor);
+        if (part_begin == std::string::npos)
+        {
+            break;
+        }
+
+        part_begin += delimiter.size();
+        if (part_begin + 2 <= body.size() && body.substr(part_begin, 2) == "--")
+        {
+            break;
+        }
+
+        if (part_begin + 2 > body.size() || body.substr(part_begin, 2) != "\r\n")
+        {
+            cursor = part_begin;
+            continue;
+        }
+        part_begin += 2;
+
+        std::size_t headers_end = body.find("\r\n\r\n", part_begin);
+        if (headers_end == std::string::npos)
+        {
+            return false;
+        }
+
+        std::string part_headers = body.substr(part_begin, headers_end - part_begin);
+        std::size_t content_begin = headers_end + 4;
+        std::size_t next_delimiter = body.find(delimiter, content_begin);
+        if (next_delimiter == std::string::npos)
+        {
+            return false;
+        }
+
+        std::size_t content_end = next_delimiter;
+        if (content_end >= 2 && body.substr(content_end - 2, 2) == "\r\n")
+        {
+            content_end -= 2;
+        }
+        std::string part_content = body.substr(content_begin, content_end - content_begin);
+
+        std::size_t name_pos = part_headers.find("name=\"");
+        if (name_pos == std::string::npos)
+        {
+            cursor = next_delimiter;
+            continue;
+        }
+
+        name_pos += 6;
+        std::size_t name_end = part_headers.find('"', name_pos);
+        if (name_end == std::string::npos)
+        {
+            return false;
+        }
+        std::string part_name = part_headers.substr(name_pos, name_end - name_pos);
+
+        std::size_t filename_pos = part_headers.find("filename=\"");
+        if (filename_pos != std::string::npos)
+        {
+            filename_pos += 10;
+            std::size_t filename_end = part_headers.find('"', filename_pos);
+            if (filename_end == std::string::npos)
+            {
+                return false;
+            }
+            file_name = part_headers.substr(filename_pos, filename_end - filename_pos);
+            file_content = part_content;
+        }
+        else
+        {
+            fields[part_name] = part_content;
+        }
+
+        cursor = next_delimiter;
+    }
+
+    return !file_content.empty();
+}
+
+bool parseBoolField(const std::string &input)
+{
+    std::string lowered = toLowerCopy(input);
+    return lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
+}
+
 Json::Value buildModelJson(const ModelEntity &model)
 {
     Json::Value item;
@@ -25,32 +176,52 @@ Json::Value buildModelJson(const ModelEntity &model)
 
 void ModelController::initRoutes(Router *router)
 {
-    router->addRoute("POST", "/api/model/add", ModelController::handleAddModel);
+    router->addRoute("POST", "/api/model/upload", ModelController::handleUploadModel);
+    router->addRoute("POST", "/api/model/add", ModelController::handleUploadModel);
     router->addRoute("POST", "/api/model/switch", ModelController::handleSwitchModel);
     router->addRoute("GET", "/api/model/current", ModelController::handleGetCurrentModel);
     router->addRoute("GET", "/api/model/list", ModelController::handleListModels);
 }
 
-void ModelController::handleAddModel(const HttpRequest &req, HttpResponse &res)
+void ModelController::handleUploadModel(const HttpRequest &req, HttpResponse &res)
 {
-    Json::Value root;
-    Json::Reader reader;
-    if (!reader.parse(req.body, root))
+    std::string content_type = getHeaderIgnoreCase(req.headers, "Content-Type");
+    if (content_type.find("multipart/form-data") == std::string::npos)
     {
         res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
+        res.body = R"({"code": 400, "msg": "模型上传仅支持 multipart/form-data"})";
         return;
     }
 
-    ModelEntity model;
-    model.model_name = root["model_name"].asString();
-    model.file_path = root["file_path"].asString();
-    model.framework = root.isMember("framework") ? root["framework"].asString() : "onnx";
-    model.uploaded_by = root.isMember("uploaded_by") ? root["uploaded_by"].asString() : "";
-    model.is_active = root.isMember("is_active") ? root["is_active"].asBool() : false;
+    std::string boundary = extractBoundary(content_type);
+    if (boundary.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "multipart/form-data 缺少 boundary"})";
+        return;
+    }
 
+    std::map<std::string, std::string> fields;
+    std::string file_name;
+    std::string file_content;
+    if (!parseMultipartForm(req.body, boundary, fields, file_name, file_content))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "multipart/form-data 解析失败"})";
+        return;
+    }
+
+    ModelUploadRequest request;
+    request.model_name = fields["model_name"];
+    request.framework = fields["framework"];
+    request.uploaded_by = fields["uploaded_by"];
+    request.is_active = parseBoolField(fields["is_active"]);
+    request.original_filename = file_name;
+    request.file_content = file_content;
+
+    ModelUploadResult result;
     std::string error_message;
-    if (!ModelService::addModel(model, error_message))
+    if (!ModelUploadService::uploadModel(request, result, error_message))
     {
         res.statusCode = 400;
         res.body = std::string("{\"code\": 400, \"msg\": \"") + error_message + "\"}";
@@ -59,8 +230,9 @@ void ModelController::handleAddModel(const HttpRequest &req, HttpResponse &res)
 
     Json::Value response;
     response["code"] = 200;
-    response["msg"] = "模型新增成功";
-    response["data"] = buildModelJson(model);
+    response["msg"] = "模型上传成功";
+    response["data"] = buildModelJson(result.model);
+    response["data"]["stored_filename"] = result.stored_filename;
 
     Json::FastWriter writer;
     res.statusCode = 200;
@@ -70,11 +242,8 @@ void ModelController::handleAddModel(const HttpRequest &req, HttpResponse &res)
 void ModelController::handleSwitchModel(const HttpRequest &req, HttpResponse &res)
 {
     Json::Value root;
-    Json::Reader reader;
-    if (!reader.parse(req.body, root))
+    if (!parseJsonObjectBody(req.body, root, res))
     {
-        res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "JSON 格式错误"})";
         return;
     }
 

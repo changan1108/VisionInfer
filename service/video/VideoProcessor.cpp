@@ -2,6 +2,7 @@
 
 #include "common/config/AppConfig.h"
 #include "service/inference/YoloInference.h"
+#include "service/video/VideoMetadataHelper.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -28,14 +29,6 @@ extern "C"
 
 namespace
 {
-struct VideoMetadata
-{
-    int width = 0;
-    int height = 0;
-    double fps = 0.0;
-    double duration_seconds = 0.0;
-};
-
 struct FrameExtractionResult
 {
     int extracted_frame_count = 0;
@@ -214,52 +207,6 @@ bool saveFrameAsPpm(const AVFrame *rgb_frame, int width, int height, const std::
 
     output.flush();
     return output.good();
-}
-
-bool readVideoMetadata(const std::string &path, VideoMetadata &metadata)
-{
-    AVFormatContext *format_context = nullptr;
-    // 打开输入视频，FFmpeg 会根据文件内容自动判断封装格式。
-    if (avformat_open_input(&format_context, path.c_str(), nullptr, nullptr) < 0)
-    {
-        return false;
-    }
-
-    // 读取流信息；没有这一步就拿不到时长、视频流、帧率等元数据。
-    if (avformat_find_stream_info(format_context, nullptr) < 0)
-    {
-        avformat_close_input(&format_context);
-        return false;
-    }
-
-    if (format_context->duration != AV_NOPTS_VALUE)
-    {
-        metadata.duration_seconds = static_cast<double>(format_context->duration) / AV_TIME_BASE;
-    }
-
-    // 找到“最合适”的视频流。一个容器里可能有多个流，这里只关心视频流。
-    int video_stream_index = av_find_best_stream(format_context, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (video_stream_index < 0)
-    {
-        avformat_close_input(&format_context);
-        return false;
-    }
-
-    AVStream *video_stream = format_context->streams[video_stream_index];
-    AVCodecParameters *codecpar = video_stream->codecpar;
-    metadata.width = codecpar->width;
-    metadata.height = codecpar->height;
-
-    // 优先使用 avg_frame_rate；若为空，再退回 r_frame_rate。
-    AVRational frame_rate = video_stream->avg_frame_rate.num != 0 ? video_stream->avg_frame_rate
-                                                                  : video_stream->r_frame_rate;
-    if (frame_rate.num != 0 && frame_rate.den != 0)
-    {
-        metadata.fps = av_q2d(frame_rate);
-    }
-
-    avformat_close_input(&format_context);
-    return metadata.width > 0 && metadata.height > 0;
 }
 
 bool extractFrames(const std::string &path,
@@ -533,9 +480,9 @@ bool VideoProcessor::processTask(const TaskEntity &task, TaskEntity &out_result)
     out_result = task;
     out_result.output_video_path = buildOutputPath(task.input_video_path, task.id);
 
-    VideoMetadata metadata;
+    VideoFileMetadata metadata;
     // 这里已经真正调用 FFmpeg 读取视频基础信息，后续抽帧和推理都会建立在这一步之上。
-    if (!readVideoMetadata(task.input_video_path, metadata))
+    if (!VideoMetadataHelper::readMetadata(task.input_video_path, metadata))
     {
         return false;
     }

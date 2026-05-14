@@ -7,6 +7,21 @@
 
 namespace
 {
+std::string escapeSql(const std::string &input)
+{
+    std::string escaped;
+    escaped.reserve(input.size() * 2);
+    for (std::size_t i = 0; i < input.size(); ++i)
+    {
+        if (input[i] == '\\' || input[i] == '\'')
+        {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(input[i]);
+    }
+    return escaped;
+}
+
 TaskEntity buildTaskEntityFromRow(MYSQL_ROW row)
 {
     TaskEntity task;
@@ -15,28 +30,29 @@ TaskEntity buildTaskEntityFromRow(MYSQL_ROW row)
     task.task_type = row[2] ? row[2] : "";
     task.submitted_by = row[3] ? row[3] : "";
     task.input_video_path = row[4] ? row[4] : "";
-    task.output_video_path = row[5] ? row[5] : "";
-    task.video_duration = row[6] ? std::stod(row[6]) : 0.0;
-    task.video_width = row[7] ? std::stoi(row[7]) : 0;
-    task.video_height = row[8] ? std::stoi(row[8]) : 0;
-    task.video_fps = row[9] ? std::stod(row[9]) : 0.0;
-    task.frame_interval = row[10] ? std::stoi(row[10]) : 1;
-    task.confidence_threshold = row[11] ? std::stod(row[11]) : 0.5;
-    task.processed_frame_count = row[12] ? std::stoi(row[12]) : 0;
-    task.detection_count = row[13] ? std::stoi(row[13]) : 0;
-    task.real_inference_executed = row[14] ? std::stoi(row[14]) != 0 : false;
-    task.result_video_generated = row[15] ? std::stoi(row[15]) != 0 : false;
-    task.used_model_name = row[16] ? row[16] : "";
-    task.used_model_framework = row[17] ? row[17] : "";
-    task.video_build_mode = row[18] ? row[18] : "";
-    task.inference_runtime_message = row[19] ? row[19] : "";
-    task.status = row[20] ? row[20] : "";
-    task.result_summary = row[21] ? row[21] : "";
-    task.error_message = row[22] ? row[22] : "";
-    task.model_id = row[23] ? std::stoi(row[23]) : 0;
-    task.created_at = row[24] ? row[24] : "";
-    task.started_at = row[25] ? row[25] : "";
-    task.finished_at = row[26] ? row[26] : "";
+    task.input_video_id = row[5] ? std::stoi(row[5]) : 0;
+    task.output_video_path = row[6] ? row[6] : "";
+    task.video_duration = row[7] ? std::stod(row[7]) : 0.0;
+    task.video_width = row[8] ? std::stoi(row[8]) : 0;
+    task.video_height = row[9] ? std::stoi(row[9]) : 0;
+    task.video_fps = row[10] ? std::stod(row[10]) : 0.0;
+    task.frame_interval = row[11] ? std::stoi(row[11]) : 1;
+    task.confidence_threshold = row[12] ? std::stod(row[12]) : 0.5;
+    task.processed_frame_count = row[13] ? std::stoi(row[13]) : 0;
+    task.detection_count = row[14] ? std::stoi(row[14]) : 0;
+    task.real_inference_executed = row[15] ? std::stoi(row[15]) != 0 : false;
+    task.result_video_generated = row[16] ? std::stoi(row[16]) != 0 : false;
+    task.used_model_name = row[17] ? row[17] : "";
+    task.used_model_framework = row[18] ? row[18] : "";
+    task.video_build_mode = row[19] ? row[19] : "";
+    task.inference_runtime_message = row[20] ? row[20] : "";
+    task.status = row[21] ? row[21] : "";
+    task.result_summary = row[22] ? row[22] : "";
+    task.error_message = row[23] ? row[23] : "";
+    task.model_id = row[24] ? std::stoi(row[24]) : 0;
+    task.created_at = row[25] ? row[25] : "";
+    task.started_at = row[26] ? row[26] : "";
+    task.finished_at = row[27] ? row[27] : "";
     return task;
 }
 }
@@ -51,10 +67,11 @@ bool TaskDao::insertTask(TaskEntity &task)
     }
 
     std::string model_id_value = task.model_id > 0 ? std::to_string(task.model_id) : "NULL";
+    std::string input_video_id_value = task.input_video_id > 0 ? std::to_string(task.input_video_id) : "NULL";
 
-    std::string sql = "INSERT INTO tasks (task_name, task_type, submitted_by, input_video_path, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id) VALUES ('" +
-                      task.task_name + "', '" + task.task_type + "', '" + task.submitted_by + "', '" +
-                      task.input_video_path + "', '" + task.output_video_path + "', " +
+    std::string sql = "INSERT INTO tasks (task_name, task_type, submitted_by, input_video_path, input_video_id, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id) VALUES ('" +
+                      escapeSql(task.task_name) + "', '" + escapeSql(task.task_type) + "', '" + escapeSql(task.submitted_by) + "', '" +
+                      escapeSql(task.input_video_path) + "', " + input_video_id_value + ", '" + escapeSql(task.output_video_path) + "', " +
                       std::to_string(task.video_duration) + ", " +
                       std::to_string(task.video_width) + ", " +
                       std::to_string(task.video_height) + ", " +
@@ -64,12 +81,12 @@ bool TaskDao::insertTask(TaskEntity &task)
                       std::to_string(task.detection_count) + ", " +
                       std::to_string(task.real_inference_executed ? 1 : 0) + ", " +
                       std::to_string(task.result_video_generated ? 1 : 0) + ", '" +
-                      task.used_model_name + "', '" +
-                      task.used_model_framework + "', '" +
-                      task.video_build_mode + "', '" +
-                      task.inference_runtime_message + "', '" +
-                      task.status + "', '" + task.result_summary + "', '" +
-                      task.error_message + "', " + model_id_value + ");";
+                      escapeSql(task.used_model_name) + "', '" +
+                      escapeSql(task.used_model_framework) + "', '" +
+                      escapeSql(task.video_build_mode) + "', '" +
+                      escapeSql(task.inference_runtime_message) + "', '" +
+                      escapeSql(task.status) + "', '" + escapeSql(task.result_summary) + "', '" +
+                      escapeSql(task.error_message) + "', " + model_id_value + ");";
 
     if (!db.update(sql))
     {
@@ -89,7 +106,7 @@ bool TaskDao::getTaskById(long long task_id, TaskEntity &out_task)
         return false;
     }
 
-    std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
+    std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, input_video_id, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
                       "FROM tasks WHERE id = " +
                       std::to_string(task_id) + ";";
 
@@ -121,7 +138,7 @@ bool TaskDao::updateTaskStatus(long long task_id, const std::string &status)
         return false;
     }
 
-    std::string sql = "UPDATE tasks SET status = '" + status + "' WHERE id = " + std::to_string(task_id) + ";";
+    std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) + "' WHERE id = " + std::to_string(task_id) + ";";
     return db.update(sql);
 }
 
@@ -147,7 +164,7 @@ bool TaskDao::markTaskCompleted(const TaskEntity &task)
         return false;
     }
 
-    std::string sql = "UPDATE tasks SET status = 'COMPLETED', output_video_path = '" + task.output_video_path +
+    std::string sql = "UPDATE tasks SET status = 'COMPLETED', output_video_path = '" + escapeSql(task.output_video_path) +
                       "', video_duration = " + std::to_string(task.video_duration) +
                       ", video_width = " + std::to_string(task.video_width) +
                       ", video_height = " + std::to_string(task.video_height) +
@@ -156,11 +173,11 @@ bool TaskDao::markTaskCompleted(const TaskEntity &task)
                       ", detection_count = " + std::to_string(task.detection_count) +
                       ", real_inference_executed = " + std::to_string(task.real_inference_executed ? 1 : 0) +
                       ", result_video_generated = " + std::to_string(task.result_video_generated ? 1 : 0) +
-                      ", used_model_name = '" + task.used_model_name +
-                      "', used_model_framework = '" + task.used_model_framework +
-                      "', video_build_mode = '" + task.video_build_mode +
-                      "', inference_runtime_message = '" + task.inference_runtime_message +
-                      "', result_summary = '" + task.result_summary +
+                      ", used_model_name = '" + escapeSql(task.used_model_name) +
+                      "', used_model_framework = '" + escapeSql(task.used_model_framework) +
+                      "', video_build_mode = '" + escapeSql(task.video_build_mode) +
+                      "', inference_runtime_message = '" + escapeSql(task.inference_runtime_message) +
+                      "', result_summary = '" + escapeSql(task.result_summary) +
                       "', error_message = '', finished_at = NOW() WHERE id = " + std::to_string(task.id) + ";";
     return db.update(sql);
 }
@@ -174,7 +191,7 @@ bool TaskDao::markTaskFailed(long long task_id, const std::string &error_message
         return false;
     }
 
-    std::string sql = "UPDATE tasks SET status = 'FAILED', error_message = '" + error_message +
+    std::string sql = "UPDATE tasks SET status = 'FAILED', error_message = '" + escapeSql(error_message) +
                       "', finished_at = NOW() WHERE id = " + std::to_string(task_id) + ";";
     return db.update(sql);
 }
@@ -195,20 +212,20 @@ std::vector<TaskEntity> TaskDao::listTasks(const TaskListFilter &filter)
         return tasks;
     }
 
-    std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
+    std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, input_video_id, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
                       "FROM tasks WHERE 1=1";
 
     if (!filter.status.empty())
     {
-        sql += " AND status = '" + filter.status + "'";
+        sql += " AND status = '" + escapeSql(filter.status) + "'";
     }
     if (!filter.task_type.empty())
     {
-        sql += " AND task_type = '" + filter.task_type + "'";
+        sql += " AND task_type = '" + escapeSql(filter.task_type) + "'";
     }
     if (!filter.submitted_by.empty())
     {
-        sql += " AND submitted_by = '" + filter.submitted_by + "'";
+        sql += " AND submitted_by = '" + escapeSql(filter.submitted_by) + "'";
     }
 
     sql += " ORDER BY id DESC LIMIT " + std::to_string(limit) + ";";

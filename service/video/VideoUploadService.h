@@ -13,10 +13,15 @@ struct VideoUploadRequest
 
 struct VideoUploadResult
 {
+    int video_id = 0;
     std::string original_filename;
     std::string stored_filename;
     std::string stored_path;
     long long file_size_bytes = 0;
+    double duration = 0.0;
+    int width = 0;
+    int height = 0;
+    double fps = 0.0;
 };
 
 class VideoUploadService
