@@ -401,8 +401,17 @@ void VideoController::handleSubmitTask(const HttpRequest &req, HttpResponse &res
     std::string error_message;
     if (!TaskService::submitTask(task, error_message))
     {
-        res.statusCode = 400;
-        res.body = std::string("{\"code\": 400, \"msg\": \"") + error_message + "\"}";
+        int response_code = 400;
+        if (task.status == TaskStatus::REJECTED_DISK_FULL)
+        {
+            response_code = 507;
+        }
+        else if (task.status == TaskStatus::REJECTED_QUEUE_FULL)
+        {
+            response_code = 503;
+        }
+        res.statusCode = response_code;
+        res.body = std::string("{\"code\": ") + std::to_string(response_code) + ", \"msg\": \"" + error_message + "\"}";
         return;
     }
 

@@ -15,6 +15,7 @@ SystemMonitor::SystemMonitor()
       peak_active_threads_(0),
       completed_tasks_(0),
       failed_tasks_(0),
+      rejected_tasks_(0),
       total_requests_(0),
       total_task_duration_ms_(0),
       total_queue_wait_ms_(0),
@@ -112,6 +113,11 @@ void SystemMonitor::incrementCompletedTasks()
 void SystemMonitor::incrementFailedTasks()
 {
     failed_tasks_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SystemMonitor::incrementRejectedTasks()
+{
+    rejected_tasks_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void SystemMonitor::incrementTotalRequests()
@@ -217,6 +223,7 @@ SystemStatusSnapshot SystemMonitor::snapshot() const
     status.peakActiveThreads = peak_active_threads_.load(std::memory_order_relaxed);
     status.completedTasks = completed_tasks_.load(std::memory_order_relaxed);
     status.failedTasks = failed_tasks_.load(std::memory_order_relaxed);
+    status.rejectedTasks = rejected_tasks_.load(std::memory_order_relaxed);
     status.totalRequests = total_requests_.load(std::memory_order_relaxed);
     status.totalTaskDurationMs = total_task_duration_ms_.load(std::memory_order_relaxed);
     status.totalQueueWaitMs = total_queue_wait_ms_.load(std::memory_order_relaxed);

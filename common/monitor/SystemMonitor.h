@@ -19,6 +19,7 @@ struct SystemStatusSnapshot
     int peakActiveThreads = 0;
     int completedTasks = 0;
     int failedTasks = 0;
+    int rejectedTasks = 0;
     std::uint64_t totalRequests = 0;
     std::uint64_t totalTaskDurationMs = 0;
     std::uint64_t totalQueueWaitMs = 0;
@@ -58,6 +59,7 @@ public:
 
     void incrementCompletedTasks();
     void incrementFailedTasks();
+    void incrementRejectedTasks();
     void incrementTotalRequests();
     void recordClientHeartbeat(const std::string &client_id);
     void recordTaskQueueWait(std::uint64_t wait_ms);
@@ -77,6 +79,7 @@ private:
     std::atomic<int> peak_active_threads_;
     std::atomic<int> completed_tasks_;
     std::atomic<int> failed_tasks_;
+    std::atomic<int> rejected_tasks_;
     std::atomic<std::uint64_t> total_requests_;
     std::atomic<std::uint64_t> total_task_duration_ms_;
     std::atomic<std::uint64_t> total_queue_wait_ms_;

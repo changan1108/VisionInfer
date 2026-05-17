@@ -4,6 +4,7 @@
 
 #include "common/config/AppConfig.h"
 #include "dao/db_conn/MysqlConn.h"
+#include "dao/db_conn/MysqlPool.h"
 
 namespace
 {
@@ -42,12 +43,7 @@ VideoEntity buildVideoEntityFromRow(MYSQL_ROW row)
 
 bool VideoDao::insertVideo(VideoEntity &video)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "INSERT INTO videos (submitted_by, original_filename, stored_filename, stored_path, file_size_bytes, duration, width, height, fps) VALUES ('" +
                       escapeSql(video.submitted_by) + "', '" +
@@ -60,27 +56,22 @@ bool VideoDao::insertVideo(VideoEntity &video)
                       std::to_string(video.height) + ", " +
                       std::to_string(video.fps) + ");";
 
-    if (!db.update(sql))
+    if (!db->update(sql))
     {
         return false;
     }
 
-    video.id = static_cast<int>(db.getLastInsertId());
+    video.id = static_cast<int>(db->getLastInsertId());
     return video.id > 0;
 }
 
 bool VideoDao::getVideoById(int video_id, VideoEntity &out_video)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, submitted_by, original_filename, stored_filename, stored_path, file_size_bytes, duration, width, height, fps, uploaded_at "
                       "FROM videos WHERE id = " + std::to_string(video_id) + ";";
-    MYSQL_RES *res = db.query(sql);
+    MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
         return false;
@@ -100,16 +91,11 @@ bool VideoDao::getVideoById(int video_id, VideoEntity &out_video)
 
 bool VideoDao::getVideoByStoredPath(const std::string &stored_path, VideoEntity &out_video)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, submitted_by, original_filename, stored_filename, stored_path, file_size_bytes, duration, width, height, fps, uploaded_at "
                       "FROM videos WHERE stored_path = '" + escapeSql(stored_path) + "' LIMIT 1;";
-    MYSQL_RES *res = db.query(sql);
+    MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
         return false;
@@ -131,12 +117,7 @@ std::vector<VideoEntity> VideoDao::listVideos(const VideoListFilter &filter)
 {
     std::vector<VideoEntity> videos;
 
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return videos;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     int limit = filter.limit <= 0 ? 20 : filter.limit;
     std::string sql = "SELECT id, submitted_by, original_filename, stored_filename, stored_path, file_size_bytes, duration, width, height, fps, uploaded_at "
@@ -154,7 +135,7 @@ std::vector<VideoEntity> VideoDao::listVideos(const VideoListFilter &filter)
 
     sql += " ORDER BY id DESC LIMIT " + std::to_string(limit) + ";";
 
-    MYSQL_RES *res = db.query(sql);
+    MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
         return videos;
@@ -172,15 +153,10 @@ std::vector<VideoEntity> VideoDao::listVideos(const VideoListFilter &filter)
 
 int VideoDao::countTasksByVideoId(int video_id)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return 0;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT COUNT(*) FROM tasks WHERE input_video_id = " + std::to_string(video_id) + ";";
-    MYSQL_RES *res = db.query(sql);
+    MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
         return 0;

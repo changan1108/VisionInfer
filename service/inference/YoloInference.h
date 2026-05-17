@@ -1,6 +1,7 @@
 #ifndef YOLO_INFERENCE_H
 #define YOLO_INFERENCE_H
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -33,6 +34,9 @@ struct InferenceResult
     int output_tensor_count = 0;
     std::string runtime_message;
     std::string summary;
+    std::uint64_t forward_duration_ms = 0;
+    std::uint64_t postprocess_duration_ms = 0;
+    std::uint64_t draw_duration_ms = 0;
 };
 
 struct InferenceModelContext
@@ -53,13 +57,17 @@ struct InferenceModelContext
     float confidence_threshold = 0.5f;
     std::string load_message;
     std::map<std::string, std::string> metadata;
+    std::vector<std::string> class_names;
 };
 
 class YoloInference
 {
 public:
     static bool buildModelContext(int task_model_id, InferenceModelContext &context, std::string &error_message);
-    static bool processFrame(FrameBuffer &frame, const InferenceModelContext &context, InferenceResult &result);
+    static bool processFrame(FrameBuffer &render_frame,
+                             const FrameBuffer &inference_frame,
+                             const InferenceModelContext &context,
+                             InferenceResult &result);
 };
 
 #endif // YOLO_INFERENCE_H

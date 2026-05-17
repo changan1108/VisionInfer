@@ -3,6 +3,7 @@
 #include "common/monitor/SystemMonitor.h"
 #include "controller/network/Router.h"
 #include "controller/network/EpollServer.h"
+#include "dao/db_conn/MysqlPool.h"
 
 // 引入各个业务模块的 Controller
 #include "controller/inference/ModelController.h"
@@ -14,6 +15,13 @@ int main()
 {
     std::cout << "[INFO] 视觉推理系统后端启动中..." << std::endl;
     SystemMonitor::instance().markServerStarted();
+    MysqlPool::instance().initialize(AppConfig::DB_USER,
+                                     AppConfig::DB_PASSWORD,
+                                     AppConfig::DB_NAME,
+                                     AppConfig::DB_HOST,
+                                     AppConfig::DB_PORT,
+                                     AppConfig::DB_POOL_MIN_SIZE,
+                                     AppConfig::DB_POOL_MAX_SIZE);
 
     // 实例化路由分发器
     Router router;

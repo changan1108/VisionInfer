@@ -12,11 +12,20 @@
 #include <type_traits>
 #include <vector>
 
+class ThreadPoolQueueFull : public std::runtime_error
+{
+public:
+    explicit ThreadPoolQueueFull(const std::string &message)
+        : std::runtime_error(message)
+    {
+    }
+};
+
 class ThreadPool
 {
 public:
-    explicit ThreadPool(std::size_t thread_count)
-        : stop_(false)
+    explicit ThreadPool(std::size_t thread_count, std::size_t max_queue_size = 0)
+        : max_queue_size_(max_queue_size), stop_(false)
     {
         if (thread_count == 0)
         {
@@ -73,6 +82,10 @@ public:
             {
                 throw std::runtime_error("enqueue on stopped ThreadPool");
             }
+            if (max_queue_size_ > 0 && tasks_.size() >= max_queue_size_)
+            {
+                throw ThreadPoolQueueFull("thread pool queue is full");
+            }
 
             tasks_.emplace([task]()
                            { (*task)(); });
@@ -108,9 +121,21 @@ public:
         return workers_.size();
     }
 
+    std::size_t queueSize() const
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        return tasks_.size();
+    }
+
+    std::size_t queueCapacity() const
+    {
+        return max_queue_size_;
+    }
+
 private:
     std::vector<std::thread> workers_;
     std::queue<std::function<void()>> tasks_;
+    const std::size_t max_queue_size_;
     mutable std::mutex queue_mutex_;
     std::condition_variable condition_;
     bool stop_;

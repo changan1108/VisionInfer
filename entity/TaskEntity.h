@@ -4,6 +4,23 @@
 #include <map>
 #include <string>
 
+namespace TaskStatus
+{
+constexpr const char *PENDING = "PENDING";
+constexpr const char *QUEUED = "QUEUED";
+constexpr const char *PROCESSING = "PROCESSING";
+constexpr const char *COMPLETED = "COMPLETED";
+constexpr const char *REJECTED_QUEUE_FULL = "REJECTED_QUEUE_FULL";
+constexpr const char *REJECTED_DISK_FULL = "REJECTED_DISK_FULL";
+constexpr const char *FAILED_INPUT_NOT_FOUND = "FAILED_INPUT_NOT_FOUND";
+constexpr const char *FAILED_OUTPUT_DIR = "FAILED_OUTPUT_DIR";
+constexpr const char *FAILED_METADATA = "FAILED_METADATA";
+constexpr const char *FAILED_INFERENCE = "FAILED_INFERENCE";
+constexpr const char *FAILED_ENCODE = "FAILED_ENCODE";
+constexpr const char *FAILED_OUTPUT_COPY = "FAILED_OUTPUT_COPY";
+constexpr const char *FAILED_RUNTIME = "FAILED_RUNTIME";
+}
+
 struct TaskEntity
 {
     long long id = 0;

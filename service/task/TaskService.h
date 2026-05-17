@@ -1,9 +1,20 @@
 #ifndef TASK_SERVICE_H
 #define TASK_SERVICE_H
 
+#include <chrono>
 #include <vector>
 
 #include "entity/TaskEntity.h"
+
+struct TaskExecutionPoolSnapshot
+{
+    std::size_t dispatchLiveThreads = 0;
+    std::size_t dispatchQueueSize = 0;
+    std::size_t dispatchQueueCapacity = 0;
+    std::size_t processingLiveThreads = 0;
+    std::size_t processingQueueSize = 0;
+    std::size_t processingQueueCapacity = 0;
+};
 
 class TaskService
 {
@@ -12,9 +23,12 @@ public:
     static bool getTaskById(long long task_id, TaskEntity &out_task);
     static std::vector<TaskEntity> listTasks(const TaskListFilter &filter);
     static TaskStats getTaskStats();
+    static TaskExecutionPoolSnapshot getExecutionPoolSnapshot();
 
 private:
     static void dispatchAsyncTask(const TaskEntity &task);
+    static void enqueueVideoProcessingTask(const TaskEntity &task,
+                                           std::chrono::steady_clock::time_point queued_at);
 };
 
 #endif // TASK_SERVICE_H

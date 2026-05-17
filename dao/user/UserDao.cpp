@@ -1,4 +1,5 @@
 #include "common/config/AppConfig.h"
+#include "dao/db_conn/MysqlPool.h"
 #include "dao/user/UserDao.h"
 #include "dao/db_conn/MysqlConn.h" // 引入我们刚写的工具类
 #include <iostream>
@@ -6,10 +7,7 @@
 // 插入新用户
 bool UserDao::insertUser(const UserEntity &user)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-        return false;
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     // 拼接超长 SQL (注意字段顺序)
     std::string sql = "INSERT INTO users (username, password, nickname, employee_id, email, phone, department, location, timezone, bio, role) VALUES ('" +
@@ -20,20 +18,17 @@ bool UserDao::insertUser(const UserEntity &user)
                       user.timezone + "', '" + user.bio + "', '" +
                       user.role + "');";
 
-    return db.update(sql);
+    return db->update(sql);
 }
 
 // 根据用户名获取用户信息
 bool UserDao::getUserByUsername(const std::string &username, UserEntity &out_user)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-        return false;
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, username, password, nickname, employee_id, email, phone, department, location, timezone, bio, role, last_login FROM users WHERE username = '" + username + "';";
 
-    MYSQL_RES *res = db.query(sql);
+    MYSQL_RES *res = db->query(sql);
     if (res != nullptr)
     {
         MYSQL_ROW row = mysql_fetch_row(res);
@@ -65,21 +60,15 @@ bool UserDao::getUserByUsername(const std::string &username, UserEntity &out_use
 // 登录成功后，更新时间
 bool UserDao::updateLoginState(int user_id)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-        return false;
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
     std::string sql = "UPDATE users SET last_login = NOW() WHERE id = " + std::to_string(user_id) + ";";
-    return db.update(sql);
+    return db->update(sql);
 }
 
 // 更新用户信息
 bool UserDao::updateUser(const UserEntity &user)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-        return false;
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     // 拼接 UPDATE 语句，注意最后要有 WHERE 条件，否则会把全库的人都改了！
     std::string sql = "UPDATE users SET "
@@ -105,5 +94,5 @@ bool UserDao::updateUser(const UserEntity &user)
                       user.username + "';";
 
     std::cout << "[UserDao INFO] 执行更新 SQL: " << sql << std::endl;
-    return db.update(sql);
+    return db->update(sql);
 }

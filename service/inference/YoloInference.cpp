@@ -1,13 +1,18 @@
 #include "service/inference/YoloInference.h"
 
+#include "common/config/AppConfig.h"
 #include "service/model/ModelService.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cctype>
 #include <memory>
 #include <mutex>
 #include <onnxruntime_cxx_api.h>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -20,8 +25,19 @@ struct CachedOnnxSession
     std::unique_ptr<Ort::Session> session;
     std::vector<std::string> input_names;
     std::vector<std::string> output_names;
+    std::vector<const char *> input_name_ptrs;
+    std::vector<const char *> output_name_ptrs;
     std::vector<int64_t> input_shape;
     std::vector<std::vector<int64_t>> output_shapes;
+    std::vector<std::string> class_names;
+};
+
+struct ForwardPassResult
+{
+    bool success = false;
+    std::vector<Ort::Value> output_tensors;
+    std::string runtime_message;
+    int output_tensor_count = 0;
 };
 
 Ort::Env &getOrtEnv()
@@ -64,6 +80,247 @@ const std::vector<std::string> &getCocoClassNames()
         "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven",
         "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"};
     return names;
+}
+
+std::string trimCopy(const std::string &input)
+{
+    std::size_t start = 0;
+    while (start < input.size() && std::isspace(static_cast<unsigned char>(input[start])) != 0)
+    {
+        ++start;
+    }
+
+    std::size_t end = input.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(input[end - 1])) != 0)
+    {
+        --end;
+    }
+    return input.substr(start, end - start);
+}
+
+std::vector<std::string> parseClassNamesMetadata(const std::string &raw_value)
+{
+    std::vector<std::string> class_names;
+    std::string compact = trimCopy(raw_value);
+    if (compact.empty())
+    {
+        return class_names;
+    }
+
+    if (!compact.empty() && compact.front() == '{' && compact.back() == '}')
+    {
+        compact = compact.substr(1, compact.size() - 2);
+    }
+    else if (!compact.empty() && compact.front() == '[' && compact.back() == ']')
+    {
+        compact = compact.substr(1, compact.size() - 2);
+    }
+
+    std::vector<std::pair<int, std::string>> indexed_names;
+    std::size_t cursor = 0;
+    while (cursor < compact.size())
+    {
+        std::size_t comma_pos = compact.find(',', cursor);
+        std::string token = compact.substr(cursor, comma_pos == std::string::npos ? std::string::npos : comma_pos - cursor);
+        token = trimCopy(token);
+        if (!token.empty())
+        {
+            std::size_t colon_pos = token.find(':');
+            if (colon_pos != std::string::npos)
+            {
+                std::string index_part = trimCopy(token.substr(0, colon_pos));
+                std::string name_part = trimCopy(token.substr(colon_pos + 1));
+                if (!name_part.empty() &&
+                    ((name_part.front() == '\'' && name_part.back() == '\'') ||
+                     (name_part.front() == '"' && name_part.back() == '"')))
+                {
+                    name_part = name_part.substr(1, name_part.size() - 2);
+                }
+                try
+                {
+                    int index = std::stoi(index_part);
+                    indexed_names.push_back(std::make_pair(index, name_part));
+                }
+                catch (...)
+                {
+                }
+            }
+            else
+            {
+                if ((token.front() == '\'' && token.back() == '\'') ||
+                    (token.front() == '"' && token.back() == '"'))
+                {
+                    token = token.substr(1, token.size() - 2);
+                }
+                class_names.push_back(token);
+            }
+        }
+
+        if (comma_pos == std::string::npos)
+        {
+            break;
+        }
+        cursor = comma_pos + 1;
+    }
+
+    if (!indexed_names.empty())
+    {
+        std::sort(indexed_names.begin(), indexed_names.end());
+        class_names.assign(static_cast<std::size_t>(indexed_names.back().first + 1), "");
+        for (const std::pair<int, std::string> &item : indexed_names)
+        {
+            if (item.first >= 0)
+            {
+                class_names[static_cast<std::size_t>(item.first)] = item.second;
+            }
+        }
+        while (!class_names.empty() && class_names.back().empty())
+        {
+            class_names.pop_back();
+        }
+    }
+
+    return class_names;
+}
+
+const std::unordered_map<char, std::array<unsigned char, 7>> &getBitmapFont()
+{
+    static const std::unordered_map<char, std::array<unsigned char, 7>> font = {
+        {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+        {'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
+        {'C', {0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F}},
+        {'D', {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E}},
+        {'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}},
+        {'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
+        {'G', {0x0F, 0x10, 0x10, 0x13, 0x11, 0x11, 0x0F}},
+        {'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+        {'I', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F}},
+        {'J', {0x1F, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0C}},
+        {'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}},
+        {'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}},
+        {'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
+        {'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}},
+        {'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+        {'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
+        {'Q', {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}},
+        {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
+        {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
+        {'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
+        {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+        {'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}},
+        {'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A}},
+        {'X', {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11}},
+        {'Y', {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04}},
+        {'Z', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F}},
+        {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+        {'1', {0x04, 0x0C, 0x14, 0x04, 0x04, 0x04, 0x1F}},
+        {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
+        {'3', {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E}},
+        {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
+        {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}},
+        {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+        {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+        {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
+        {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+        {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06}},
+        {'_', {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F}},
+        {'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
+        {' ', {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}}};
+    return font;
+}
+
+void setPixel(FrameBuffer &frame, int x, int y, unsigned char r, unsigned char g, unsigned char b)
+{
+    if (x < 0 || y < 0 || x >= frame.width || y >= frame.height)
+    {
+        return;
+    }
+    unsigned char *pixel = frame.data + static_cast<std::ptrdiff_t>(y) * frame.linesize + static_cast<std::ptrdiff_t>(x) * 3;
+    pixel[0] = r;
+    pixel[1] = g;
+    pixel[2] = b;
+}
+
+void fillRect(FrameBuffer &frame, int left, int top, int right, int bottom, unsigned char r, unsigned char g, unsigned char b)
+{
+    int clamped_left = std::max(0, left);
+    int clamped_top = std::max(0, top);
+    int clamped_right = std::min(frame.width - 1, right);
+    int clamped_bottom = std::min(frame.height - 1, bottom);
+    for (int y = clamped_top; y <= clamped_bottom; ++y)
+    {
+        for (int x = clamped_left; x <= clamped_right; ++x)
+        {
+            setPixel(frame, x, y, r, g, b);
+        }
+    }
+}
+
+void drawBitmapChar(FrameBuffer &frame,
+                    int origin_x,
+                    int origin_y,
+                    char ch,
+                    int scale,
+                    unsigned char r,
+                    unsigned char g,
+                    unsigned char b)
+{
+    char normalized = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    const auto &font = getBitmapFont();
+    auto it = font.find(normalized);
+    if (it == font.end())
+    {
+        it = font.find(' ');
+    }
+
+    const std::array<unsigned char, 7> &glyph = it->second;
+    for (int row = 0; row < 7; ++row)
+    {
+        for (int col = 0; col < 5; ++col)
+        {
+            if ((glyph[static_cast<std::size_t>(row)] >> (4 - col)) & 0x01U)
+            {
+                for (int dy = 0; dy < scale; ++dy)
+                {
+                    for (int dx = 0; dx < scale; ++dx)
+                    {
+                        setPixel(frame,
+                                 origin_x + col * scale + dx,
+                                 origin_y + row * scale + dy,
+                                 r,
+                                 g,
+                                 b);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void drawText(FrameBuffer &frame,
+              int origin_x,
+              int origin_y,
+              const std::string &text,
+              int scale,
+              unsigned char r,
+              unsigned char g,
+              unsigned char b)
+{
+    int x = origin_x;
+    for (char ch : text)
+    {
+        drawBitmapChar(frame, x, origin_y, ch, scale, r, g, b);
+        x += 6 * scale;
+    }
+}
+
+std::string formatDetectionCaption(const DetectionBox &box)
+{
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss.precision(2);
+    oss << box.label << " " << box.confidence;
+    return oss.str();
 }
 
 float intersectionOverUnion(const DetectionBox &a, const DetectionBox &b)
@@ -138,8 +395,14 @@ bool getOrCreateOnnxSession(const std::string &model_path,
         auto holder = std::make_shared<CachedOnnxSession>();
 
         Ort::SessionOptions session_options;
-        session_options.SetIntraOpNumThreads(1);
-        session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
+        int intra_threads = AppConfig::ONNX_INTRA_OP_THREADS > 0
+                                ? AppConfig::ONNX_INTRA_OP_THREADS
+                                : static_cast<int>(std::max(1u, std::thread::hardware_concurrency() / 2));
+        int inter_threads = AppConfig::ONNX_INTER_OP_THREADS > 0 ? AppConfig::ONNX_INTER_OP_THREADS : 1;
+        session_options.SetIntraOpNumThreads(intra_threads);
+        session_options.SetInterOpNumThreads(inter_threads);
+        session_options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         holder->session = std::make_unique<Ort::Session>(getOrtEnv(), model_path.c_str(), session_options);
 
@@ -151,6 +414,7 @@ bool getOrCreateOnnxSession(const std::string &model_path,
         {
             auto input_name = holder->session->GetInputNameAllocated(i, allocator);
             holder->input_names.emplace_back(input_name.get());
+            holder->input_name_ptrs.push_back(holder->input_names.back().c_str());
 
             Ort::TypeInfo type_info = holder->session->GetInputTypeInfo(i);
             auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
@@ -164,10 +428,31 @@ bool getOrCreateOnnxSession(const std::string &model_path,
         {
             auto output_name = holder->session->GetOutputNameAllocated(i, allocator);
             holder->output_names.emplace_back(output_name.get());
+            holder->output_name_ptrs.push_back(holder->output_names.back().c_str());
 
             Ort::TypeInfo type_info = holder->session->GetOutputTypeInfo(i);
             auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
             holder->output_shapes.push_back(tensor_info.GetShape());
+        }
+
+        Ort::ModelMetadata metadata = holder->session->GetModelMetadata();
+        std::vector<Ort::AllocatedStringPtr> metadata_keys = metadata.GetCustomMetadataMapKeysAllocated(allocator);
+        for (const auto &key_ptr : metadata_keys)
+        {
+            const char *key_cstr = key_ptr.get();
+            if (key_cstr == nullptr)
+            {
+                continue;
+            }
+            std::string key = key_cstr;
+            if (key == "names" || key == "classes")
+            {
+                auto value_ptr = metadata.LookupCustomMetadataMapAllocated(key.c_str(), allocator);
+                if (value_ptr)
+                {
+                    holder->class_names = parseClassNamesMetadata(value_ptr.get());
+                }
+            }
         }
 
         if (holder->input_shape.size() != 4)
@@ -190,40 +475,88 @@ bool getOrCreateOnnxSession(const std::string &model_path,
     }
 }
 
+struct ResizeIndexCache
+{
+    int source_width = 0;
+    int source_height = 0;
+    int target_width = 0;
+    int target_height = 0;
+    std::vector<int> x_map;
+    std::vector<int> y_map;
+};
+
+ResizeIndexCache &getResizeIndexCache(int source_width, int source_height, int target_width, int target_height)
+{
+    thread_local ResizeIndexCache cache;
+    if (cache.source_width == source_width &&
+        cache.source_height == source_height &&
+        cache.target_width == target_width &&
+        cache.target_height == target_height)
+    {
+        return cache;
+    }
+
+    cache.source_width = source_width;
+    cache.source_height = source_height;
+    cache.target_width = target_width;
+    cache.target_height = target_height;
+    cache.x_map.resize(static_cast<std::size_t>(target_width));
+    cache.y_map.resize(static_cast<std::size_t>(target_height));
+    for (int x = 0; x < target_width; ++x)
+    {
+        cache.x_map[static_cast<std::size_t>(x)] = std::min(source_width - 1, x * source_width / target_width);
+    }
+    for (int y = 0; y < target_height; ++y)
+    {
+        cache.y_map[static_cast<std::size_t>(y)] = std::min(source_height - 1, y * source_height / target_height);
+    }
+    return cache;
+}
+
 void fillInputTensorFromRgbFrame(const FrameBuffer &frame,
                                  int target_width,
                                  int target_height,
                                  std::vector<float> &tensor)
 {
     int plane_size = target_width * target_height;
-    tensor.assign(static_cast<std::size_t>(3 * plane_size), 0.0f);
+    std::size_t tensor_size = static_cast<std::size_t>(3 * plane_size);
+    if (tensor.size() != tensor_size)
+    {
+        tensor.resize(tensor_size);
+    }
+
+    ResizeIndexCache &cache = getResizeIndexCache(frame.width, frame.height, target_width, target_height);
+    float *plane_r = tensor.data();
+    float *plane_g = plane_r + plane_size;
+    float *plane_b = plane_g + plane_size;
 
     for (int y = 0; y < target_height; ++y)
     {
-        int src_y = std::min(frame.height - 1, y * frame.height / target_height);
-        const unsigned char *src_row = frame.data + src_y * frame.linesize;
+        int src_y = cache.y_map[static_cast<std::size_t>(y)];
+        const unsigned char *src_row = frame.data + static_cast<std::ptrdiff_t>(src_y) * frame.linesize;
+        int row_offset = y * target_width;
         for (int x = 0; x < target_width; ++x)
         {
-            int src_x = std::min(frame.width - 1, x * frame.width / target_width);
-            const unsigned char *pixel = src_row + src_x * 3;
-            int index = y * target_width + x;
+            int src_x = cache.x_map[static_cast<std::size_t>(x)];
+            const unsigned char *pixel = src_row + static_cast<std::ptrdiff_t>(src_x) * 3;
+            int index = row_offset + x;
 
-            tensor[0 * plane_size + index] = static_cast<float>(pixel[0]) / 255.0f;
-            tensor[1 * plane_size + index] = static_cast<float>(pixel[1]) / 255.0f;
-            tensor[2 * plane_size + index] = static_cast<float>(pixel[2]) / 255.0f;
+            plane_r[index] = static_cast<float>(pixel[0]) * (1.0f / 255.0f);
+            plane_g[index] = static_cast<float>(pixel[1]) * (1.0f / 255.0f);
+            plane_b[index] = static_cast<float>(pixel[2]) * (1.0f / 255.0f);
         }
     }
 }
 
 bool runOnnxForward(const FrameBuffer &frame,
                     const InferenceModelContext &context,
-                    InferenceResult &result)
+                    ForwardPassResult &forward_result)
 {
     std::shared_ptr<CachedOnnxSession> cached_session;
     std::string session_message;
     if (!getOrCreateOnnxSession(context.model_path, cached_session, session_message))
     {
-        result.runtime_message = session_message;
+        forward_result.runtime_message = session_message;
         return false;
     }
 
@@ -243,29 +576,18 @@ bool runOnnxForward(const FrameBuffer &frame,
                                                               input_shape.data(),
                                                               input_shape.size());
 
-    std::vector<const char *> input_names;
-    for (const std::string &name : cached_session->input_names)
-    {
-        input_names.push_back(name.c_str());
-    }
-
-    std::vector<const char *> output_names;
-    for (const std::string &name : cached_session->output_names)
-    {
-        output_names.push_back(name.c_str());
-    }
-
     try
     {
         auto output_tensors = cached_session->session->Run(Ort::RunOptions{nullptr},
-                                                           input_names.data(),
+                                                           cached_session->input_name_ptrs.data(),
                                                            &input_tensor,
                                                            1,
-                                                           output_names.data(),
-                                                           output_names.size());
+                                                           cached_session->output_name_ptrs.data(),
+                                                           cached_session->output_name_ptrs.size());
 
-        result.real_inference_ran = true;
-        result.output_tensor_count = static_cast<int>(output_tensors.size());
+        forward_result.success = true;
+        forward_result.output_tensor_count = static_cast<int>(output_tensors.size());
+        forward_result.output_tensors = std::move(output_tensors);
 
         std::ostringstream oss;
         oss << "真实前向推理成功，input_shape=" << shapeToString(input_shape);
@@ -273,13 +595,13 @@ bool runOnnxForward(const FrameBuffer &frame,
         {
             oss << "，first_output_shape=" << shapeToString(cached_session->output_shapes[0]);
         }
-        oss << "，output_tensor_count=" << output_tensors.size();
-        result.runtime_message = oss.str();
+        oss << "，output_tensor_count=" << forward_result.output_tensor_count;
+        forward_result.runtime_message = oss.str();
         return true;
     }
     catch (const Ort::Exception &ex)
     {
-        result.runtime_message = std::string("真实前向推理失败: ") + ex.what();
+        forward_result.runtime_message = std::string("真实前向推理失败: ") + ex.what();
         return false;
     }
 }
@@ -337,7 +659,9 @@ bool decodeYoloV8Output(const Ort::Value &output_tensor,
     }
 
     int class_count = features - 4;
-    const std::vector<std::string> &class_names = getCocoClassNames();
+    const std::vector<std::string> &class_names = context.class_names.empty()
+                                                      ? getCocoClassNames()
+                                                      : context.class_names;
     float scale_x = static_cast<float>(frame.width) / static_cast<float>(context.input_width);
     float scale_y = static_cast<float>(frame.height) / static_cast<float>(context.input_height);
 
@@ -440,6 +764,18 @@ void drawDetectionBox(FrameBuffer &frame, const DetectionBox &box)
             }
         }
     }
+
+    std::string caption = formatDetectionCaption(box);
+    const int text_scale = 3;
+    int caption_width = static_cast<int>(caption.size()) * 6 * text_scale - text_scale;
+    int caption_height = 7 * text_scale + 4;
+    int caption_left = std::max(0, box.left);
+    int caption_top = std::max(0, box.top - caption_height - 2);
+    int caption_right = std::min(frame.width - 1, caption_left + caption_width + 3);
+    int caption_bottom = std::min(frame.height - 1, caption_top + caption_height);
+
+    fillRect(frame, caption_left, caption_top, caption_right, caption_bottom, 255, 0, 0);
+    drawText(frame, caption_left + 2, caption_top + 2, caption, text_scale, 255, 255, 255);
 }
 }
 
@@ -523,10 +859,15 @@ bool YoloInference::buildModelContext(int task_model_id, InferenceModelContext &
                 context.input_width = static_cast<int>(cached_session->input_shape[3] > 0 ? cached_session->input_shape[3] : 640);
             }
             context.output_tensor_count = static_cast<int>(cached_session->output_names.size());
+            context.class_names = cached_session->class_names;
             context.metadata["input_shape"] = shapeToString(cached_session->input_shape);
             if (!cached_session->output_shapes.empty())
             {
                 context.metadata["first_output_shape"] = shapeToString(cached_session->output_shapes[0]);
+            }
+            if (!context.class_names.empty())
+            {
+                context.metadata["class_count"] = std::to_string(context.class_names.size());
             }
         }
     }
@@ -536,89 +877,72 @@ bool YoloInference::buildModelContext(int task_model_id, InferenceModelContext &
     return true;
 }
 
-bool YoloInference::processFrame(FrameBuffer &frame, const InferenceModelContext &context, InferenceResult &result)
+bool YoloInference::processFrame(FrameBuffer &render_frame,
+                                 const FrameBuffer &inference_frame,
+                                 const InferenceModelContext &context,
+                                 InferenceResult &result)
 {
-    if (frame.data == nullptr || frame.width <= 0 || frame.height <= 0)
+    if (render_frame.data == nullptr || render_frame.width <= 0 || render_frame.height <= 0)
+    {
+        return false;
+    }
+
+    if (inference_frame.data == nullptr || inference_frame.width <= 0 || inference_frame.height <= 0)
     {
         return false;
     }
 
     bool forward_success = false;
+    ForwardPassResult forward_result;
     if (context.load_success && context.framework == "onnx")
     {
-        forward_success = runOnnxForward(frame, context, result);
+        auto forward_started_at = std::chrono::steady_clock::now();
+        forward_success = runOnnxForward(inference_frame, context, forward_result);
+        auto forward_finished_at = std::chrono::steady_clock::now();
+        result.forward_duration_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(forward_finished_at - forward_started_at).count());
     }
 
     result.model_name = context.model_name;
     result.model_framework = context.framework;
+    result.real_inference_ran = forward_success;
+    result.output_tensor_count = forward_result.output_tensor_count;
+    result.runtime_message = forward_result.runtime_message;
     bool decode_success = false;
-    if (forward_success && result.output_tensor_count > 0)
+    if (forward_success && !forward_result.output_tensors.empty())
     {
-        std::shared_ptr<CachedOnnxSession> cached_session;
-        std::string ignored_message;
-        if (getOrCreateOnnxSession(context.model_path, cached_session, ignored_message))
-        {
-            std::vector<int64_t> input_shape = cached_session->input_shape;
-            input_shape[0] = 1;
-            input_shape[1] = context.input_channels;
-            input_shape[2] = context.input_height;
-            input_shape[3] = context.input_width;
-
-            std::vector<float> input_tensor_values;
-            fillInputTensorFromRgbFrame(frame, context.input_width, context.input_height, input_tensor_values);
-            Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info,
-                                                                      input_tensor_values.data(),
-                                                                      input_tensor_values.size(),
-                                                                      input_shape.data(),
-                                                                      input_shape.size());
-            std::vector<const char *> input_names;
-            for (const std::string &name : cached_session->input_names)
-            {
-                input_names.push_back(name.c_str());
-            }
-            std::vector<const char *> output_names;
-            for (const std::string &name : cached_session->output_names)
-            {
-                output_names.push_back(name.c_str());
-            }
-            try
-            {
-                auto output_tensors = cached_session->session->Run(Ort::RunOptions{nullptr},
-                                                                   input_names.data(),
-                                                                   &input_tensor,
-                                                                   1,
-                                                                   output_names.data(),
-                                                                   output_names.size());
-                if (!output_tensors.empty())
-                {
-                    decode_success = decodeYoloV8Output(output_tensors[0], frame, context, result);
-                }
-            }
-            catch (const Ort::Exception &ex)
-            {
-                result.runtime_message += std::string("；后处理阶段重新执行 Run 失败: ") + ex.what();
-            }
-        }
+        auto postprocess_started_at = std::chrono::steady_clock::now();
+        decode_success = decodeYoloV8Output(forward_result.output_tensors[0], render_frame, context, result);
+        auto postprocess_finished_at = std::chrono::steady_clock::now();
+        result.postprocess_duration_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(postprocess_finished_at - postprocess_started_at).count());
     }
 
     if (decode_success && !result.boxes.empty())
     {
+        auto draw_started_at = std::chrono::steady_clock::now();
         for (const DetectionBox &box : result.boxes)
         {
-            drawDetectionBox(frame, box);
+            drawDetectionBox(render_frame, box);
         }
+        auto draw_finished_at = std::chrono::steady_clock::now();
+        result.draw_duration_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(draw_finished_at - draw_started_at).count());
     }
     else if (!forward_success)
     {
         DetectionBox box;
-        box.left = frame.width / 3;
-        box.top = frame.height / 3;
-        box.right = box.left + frame.width / 3;
-        box.bottom = box.top + frame.height / 3;
+        box.left = render_frame.width / 3;
+        box.top = render_frame.height / 3;
+        box.right = box.left + render_frame.width / 3;
+        box.bottom = box.top + render_frame.height / 3;
         box.label = "placeholder_target";
         box.confidence = 0.85f;
-        drawDetectionBox(frame, box);
+        auto draw_started_at = std::chrono::steady_clock::now();
+        drawDetectionBox(render_frame, box);
+        auto draw_finished_at = std::chrono::steady_clock::now();
+        result.draw_duration_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(draw_finished_at - draw_started_at).count());
         result.detection_count = 1;
         result.boxes.clear();
         result.boxes.push_back(box);

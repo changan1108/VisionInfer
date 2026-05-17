@@ -2,6 +2,7 @@
 
 #include "common/config/AppConfig.h"
 #include "dao/db_conn/MysqlConn.h"
+#include "dao/db_conn/MysqlPool.h"
 
 #include <iostream>
 
@@ -59,12 +60,7 @@ TaskEntity buildTaskEntityFromRow(MYSQL_ROW row)
 
 bool TaskDao::insertTask(TaskEntity &task)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string model_id_value = task.model_id > 0 ? std::to_string(task.model_id) : "NULL";
     std::string input_video_id_value = task.input_video_id > 0 ? std::to_string(task.input_video_id) : "NULL";
@@ -88,29 +84,24 @@ bool TaskDao::insertTask(TaskEntity &task)
                       escapeSql(task.status) + "', '" + escapeSql(task.result_summary) + "', '" +
                       escapeSql(task.error_message) + "', " + model_id_value + ");";
 
-    if (!db.update(sql))
+    if (!db->update(sql))
     {
         return false;
     }
 
-    task.id = db.getLastInsertId();
+    task.id = db->getLastInsertId();
     return task.id > 0;
 }
 
 bool TaskDao::getTaskById(long long task_id, TaskEntity &out_task)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, input_video_id, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
                       "FROM tasks WHERE id = " +
                       std::to_string(task_id) + ";";
 
-    MYSQL_RES *res = db.query(sql);
+    MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
         return false;
@@ -131,38 +122,23 @@ bool TaskDao::getTaskById(long long task_id, TaskEntity &out_task)
 
 bool TaskDao::updateTaskStatus(long long task_id, const std::string &status)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) + "' WHERE id = " + std::to_string(task_id) + ";";
-    return db.update(sql);
+    return db->update(sql);
 }
 
-bool TaskDao::markTaskStarted(long long task_id)
+bool TaskDao::markTaskStarted(long long task_id, const std::string &status)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    std::string sql = "UPDATE tasks SET status = 'PROCESSING', started_at = NOW() WHERE id = " + std::to_string(task_id) + ";";
-    return db.update(sql);
+    std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) + "', started_at = NOW() WHERE id = " + std::to_string(task_id) + ";";
+    return db->update(sql);
 }
 
 bool TaskDao::markTaskCompleted(const TaskEntity &task)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "UPDATE tasks SET status = 'COMPLETED', output_video_path = '" + escapeSql(task.output_video_path) +
                       "', video_duration = " + std::to_string(task.video_duration) +
@@ -179,21 +155,25 @@ bool TaskDao::markTaskCompleted(const TaskEntity &task)
                       "', inference_runtime_message = '" + escapeSql(task.inference_runtime_message) +
                       "', result_summary = '" + escapeSql(task.result_summary) +
                       "', error_message = '', finished_at = NOW() WHERE id = " + std::to_string(task.id) + ";";
-    return db.update(sql);
+    return db->update(sql);
 }
 
-bool TaskDao::markTaskFailed(long long task_id, const std::string &error_message)
+bool TaskDao::markTaskFailed(long long task_id, const std::string &status, const std::string &error_message)
 {
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return false;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    std::string sql = "UPDATE tasks SET status = 'FAILED', error_message = '" + escapeSql(error_message) +
+    std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) + "', error_message = '" + escapeSql(error_message) +
                       "', finished_at = NOW() WHERE id = " + std::to_string(task_id) + ";";
-    return db.update(sql);
+    return db->update(sql);
+}
+
+bool TaskDao::markTaskRejected(long long task_id, const std::string &status, const std::string &error_message)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) + "', error_message = '" + escapeSql(error_message) +
+                      "', finished_at = NOW() WHERE id = " + std::to_string(task_id) + ";";
+    return db->update(sql);
 }
 
 std::vector<TaskEntity> TaskDao::listTasks(const TaskListFilter &filter)
@@ -205,12 +185,7 @@ std::vector<TaskEntity> TaskDao::listTasks(const TaskListFilter &filter)
         limit = 10;
     }
 
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return tasks;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, input_video_id, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
                       "FROM tasks WHERE 1=1";
@@ -230,7 +205,7 @@ std::vector<TaskEntity> TaskDao::listTasks(const TaskListFilter &filter)
 
     sql += " ORDER BY id DESC LIMIT " + std::to_string(limit) + ";";
 
-    MYSQL_RES *res = db.query(sql);
+    MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
         return tasks;
@@ -250,17 +225,12 @@ TaskStats TaskDao::getTaskStats()
 {
     TaskStats stats;
 
-    MysqlConn db;
-    if (!db.connect(AppConfig::DB_USER, AppConfig::DB_PASSWORD, AppConfig::DB_NAME,
-                    AppConfig::DB_HOST, AppConfig::DB_PORT))
-    {
-        return stats;
-    }
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    MYSQL_RES *overview_res = db.query("SELECT COUNT(*), "
-                                       "SUM(CASE WHEN result_video_generated = 1 THEN 1 ELSE 0 END), "
-                                       "SUM(CASE WHEN real_inference_executed = 1 THEN 1 ELSE 0 END) "
-                                       "FROM tasks;");
+    MYSQL_RES *overview_res = db->query("SELECT COUNT(*), "
+                                        "SUM(CASE WHEN result_video_generated = 1 THEN 1 ELSE 0 END), "
+                                        "SUM(CASE WHEN real_inference_executed = 1 THEN 1 ELSE 0 END) "
+                                        "FROM tasks;");
     if (overview_res != nullptr)
     {
         MYSQL_ROW row = mysql_fetch_row(overview_res);
@@ -273,7 +243,7 @@ TaskStats TaskDao::getTaskStats()
         mysql_free_result(overview_res);
     }
 
-    MYSQL_RES *status_res = db.query("SELECT status, COUNT(*) FROM tasks GROUP BY status;");
+    MYSQL_RES *status_res = db->query("SELECT status, COUNT(*) FROM tasks GROUP BY status;");
     if (status_res != nullptr)
     {
         MYSQL_ROW row = nullptr;
@@ -286,7 +256,7 @@ TaskStats TaskDao::getTaskStats()
         mysql_free_result(status_res);
     }
 
-    MYSQL_RES *type_res = db.query("SELECT task_type, COUNT(*) FROM tasks GROUP BY task_type;");
+    MYSQL_RES *type_res = db->query("SELECT task_type, COUNT(*) FROM tasks GROUP BY task_type;");
     if (type_res != nullptr)
     {
         MYSQL_ROW row = nullptr;
