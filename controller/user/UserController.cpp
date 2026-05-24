@@ -27,6 +27,31 @@ bool parseJsonObjectBody(const std::string &body, Json::Value &root, HttpRespons
 
     return true;
 }
+
+bool isDigitsOnly(const std::string &value)
+{
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch)
+                       { return std::isdigit(ch) != 0; });
+}
+
+bool validateContactFields(const UserEntity &user, HttpResponse &res)
+{
+    if (user.phone.length() != 11 || !isDigitsOnly(user.phone))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "联系电话必须是11位纯数字"})";
+        return false;
+    }
+
+    if (user.email.find('@') == std::string::npos)
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "电子邮箱必须包含@"})";
+        return false;
+    }
+
+    return true;
+}
 }
 
 // User模块的路由注册(使用router)
@@ -71,7 +96,8 @@ void UserController::handleAddUser(const HttpRequest &req, HttpResponse &res)
 
     // 1. 校验用户名：只能是 英文 和 数字
     // std::all_of 会遍历字符串每个字符，::isalnum 检查字符是否为字母或数字
-    if (user.username.empty() || !std::all_of(user.username.begin(), user.username.end(), ::isalnum))
+    if (user.username.empty() || !std::all_of(user.username.begin(), user.username.end(), [](unsigned char ch)
+                                              { return std::isalnum(ch) != 0; }))
     {
         res.statusCode = 400;
         res.body = R"({"code": 400, "msg": "用户名不能为空，且只能包含英文和数字"})";
@@ -80,18 +106,16 @@ void UserController::handleAddUser(const HttpRequest &req, HttpResponse &res)
 
     // 2. 校验工号：必须是 3 位数字
     // ::isdigit 检查字符是否为 0-9 的数字
-    if (user.employee_id.length() != 3 || !std::all_of(user.employee_id.begin(), user.employee_id.end(), ::isdigit))
+    if (user.employee_id.length() != 3 || !isDigitsOnly(user.employee_id))
     {
         res.statusCode = 400;
         res.body = R"({"code": 400, "msg": "工号必须是3位纯数字"})";
         return;
     }
 
-    // 3. 校验手机号：必须是 11 位数字
-    if (user.phone.length() != 11 || !std::all_of(user.phone.begin(), user.phone.end(), ::isdigit))
+    // 3. 校验联系方式
+    if (!validateContactFields(user, res))
     {
-        res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "联系电话必须是11位纯数字"})";
         return;
     }
 
@@ -237,18 +261,16 @@ void UserController::handleUpdateUser(const HttpRequest &req, HttpResponse &res)
     // =============== 【参数严格校验阶段 (复用之前的逻辑)】 ===============
 
     // 校验工号：必须是 3 位数字
-    if (user.employee_id.length() != 3 || !std::all_of(user.employee_id.begin(), user.employee_id.end(), ::isdigit))
+    if (user.employee_id.length() != 3 || !isDigitsOnly(user.employee_id))
     {
         res.statusCode = 400;
         res.body = R"({"code": 400, "msg": "工号必须是3位纯数字"})";
         return;
     }
 
-    // 校验手机号：必须是 11 位数字
-    if (user.phone.length() != 11 || !std::all_of(user.phone.begin(), user.phone.end(), ::isdigit))
+    // 校验联系方式
+    if (!validateContactFields(user, res))
     {
-        res.statusCode = 400;
-        res.body = R"({"code": 400, "msg": "联系电话必须是11位纯数字"})";
         return;
     }
     // ===================================================================
