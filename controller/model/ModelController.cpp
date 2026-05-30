@@ -1,4 +1,4 @@
-#include "controller/inference/ModelController.h"
+#include "ModelController.h"
 
 #include <algorithm>
 #include <cctype>

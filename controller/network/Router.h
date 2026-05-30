@@ -9,7 +9,10 @@
 class Router
 {
 public:
-    // 定义处理函数的类型（输入请求对象，填充响应对象）
+    // function<>是C++标准库提供的“可调用对象包装器”
+    // 返回值为void、参数列表为const HttpRequest &, HttpResponse &的函数，即是function<void(const HttpRequest &, HttpResponse &)>类型，
+    // 别名HandlerFunc类型（该类型对应的变量值，就是符合对应要求的"函数签名"（即，函数名，本质是"可调用对象"））
+    // 注意，这里传入的函数：普通函数或者静态成员函数，因为静态的可以直接使用类名指示出函数，而非静态成员函数需要对象，通常用lambda包一层。
     using HandlerFunc = std::function<void(const HttpRequest &, HttpResponse &)>;
 
     // 开放给各个业务 Controller 使用的路由注册接口:用于向“路由表”添加路由项(即，注册路由的工具)

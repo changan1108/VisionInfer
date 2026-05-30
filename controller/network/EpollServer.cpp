@@ -62,7 +62,7 @@ bool EpollServer::init()
         return false;
     }
 
-    // 开始监听
+    // 设置监听上限
     if (listen(listen_fd_, SOMAXCONN) < 0)
     {
         std::cerr << "[EpollServer ERROR] 监听失败!" << std::endl;
@@ -140,9 +140,14 @@ void EpollServer::handleNewConnection()
 
 void EpollServer::handleReadEvent(int client_fd)
 {
+    // 创建一个当前元素value的引用，其中，operator[] 有一个特性：如果 key 已经存在，就返回对应的 value；如果 key 不存在，就自动插入一个默认构造的 value，然后返回它。
+    // 所以，会实现效果：取出当前 client_fd 对应的请求缓存；如果之前没有，就自动创建一个空字符串。
     std::string &raw_request = request_buffers_[client_fd];
+
+    // char[] 适合和 recv 这种 C 系统调用交互；
     char buffer[4096];
 
+    // 非阻塞cfd，一次性读取数据到raw_request
     for (;;)
     {
         memset(buffer, 0, sizeof(buffer));
@@ -161,11 +166,12 @@ void EpollServer::handleReadEvent(int client_fd)
             return;
         }
 
+        // 返回-1 且设置了errno == EAGAIN || errno == EWOULDBLOCK，表示读空
         if (errno == EAGAIN || errno == EWOULDBLOCK)
         {
             break;
         }
-
+        // 返回-1，errno设置了其他，表示出错，读取失败
         std::cerr << "[EpollServer ERROR] 读取客户端数据失败，FD: " << client_fd << std::endl;
         closeClient(client_fd);
         return;

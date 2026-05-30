@@ -31,7 +31,7 @@ private:
     // 初始化网络设置 (Socket, Bind, Listen, Epoll_create)
     bool init();
 
-    // 将 Socket 设置为非阻塞模式 (高并发必备)
+    // 将某个cfd设置为非阻塞模式 (高并发必备)
     void setNonBlocking(int fd);
 
     // 处理新的客户端连接

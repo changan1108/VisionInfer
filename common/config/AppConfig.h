@@ -6,7 +6,9 @@
 
 namespace AppConfig
 {
+// 使用constexpr，表示当前值是编译期常量，在编译时就计算出来/确定下来，不可修改（他与const一样都不可修改）
 constexpr int SERVER_PORT = 9527;
+// 这里为什么又加const，因为const属于常量指针，表示指针指向的内存上的数据不可修改，之后，constexpr用来修饰指针，表示指针指向不可修改，且编译期就确定(速度快)
 constexpr const char *PROJECT_ROOT = "/home/chenwanyao/graduation_project";
 
 constexpr const char *DB_HOST = "127.0.0.1";

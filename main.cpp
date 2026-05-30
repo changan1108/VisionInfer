@@ -6,7 +6,7 @@
 #include "dao/db_conn/MysqlPool.h"
 
 // 引入各个业务模块的 Controller
-#include "controller/inference/ModelController.h"
+#include "controller/model/ModelController.h"
 #include "controller/system/SystemController.h"
 #include "controller/user/UserController.h"
 #include "controller/video/VideoController.h"

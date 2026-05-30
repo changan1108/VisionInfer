@@ -19,7 +19,9 @@ void Router::handleRequest(const HttpRequest &req, HttpResponse &res)
     if (it != routes_.end())
     {
         // 找到了对应的回调函数，执行
-        it->second(req, res);
+        // it指向map元素，即pair<string, HandlerFunc>，
+        // 所以，it->first是URL（如"POST /api/user/login"）；it->second是函数签名HandlerFunc,本质是可调用对象（如UserController::handleLogin）
+        it->second(req, res);// 可调用对象(函数签名)+"()"+实参
     }
     else
     {
