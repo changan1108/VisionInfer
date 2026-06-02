@@ -1,10 +1,12 @@
 #include "controller/user/UserController.h"
+#include "service/auth/AuthService.h"
 #include "service/user/UserService.h" // 引入 Service 层
 #include "entity/UserEntity.h"
 #include <json/json.h>
 #include <iostream>
 #include <algorithm>
 #include <cctype>
+#include <vector>
 
 namespace
 {
@@ -52,6 +54,56 @@ bool validateContactFields(const UserEntity &user, HttpResponse &res)
 
     return true;
 }
+
+bool parseIntParam(const std::string &value, int &out_value)
+{
+    try
+    {
+        std::size_t parsed = 0;
+        int parsed_value = std::stoi(value, &parsed);
+        if (parsed != value.size())
+        {
+            return false;
+        }
+        out_value = parsed_value;
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+int authErrorStatusCode(const std::string &error_message)
+{
+    if (error_message.find("禁用") != std::string::npos ||
+        error_message.find("权限等级非法") != std::string::npos)
+    {
+        return 403;
+    }
+    return 401;
+}
+
+Json::Value buildUserListItemJson(const UserEntity &user)
+{
+    Json::Value item;
+    item["id"] = user.id;
+    item["username"] = user.username;
+    item["nickname"] = user.nickname;
+    item["employee_id"] = user.employee_id;
+    item["email"] = user.email;
+    item["phone"] = user.phone;
+    item["department"] = user.department;
+    item["location"] = user.location;
+    item["timezone"] = user.timezone;
+    item["role"] = user.role;
+    item["permission_level"] = user.permission_level;
+    item["account_status"] = user.account_status;
+    item["last_login"] = user.last_login;
+    item["created_at"] = user.created_at;
+    item["updated_at"] = user.updated_at;
+    return item;
+}
 }
 
 // User模块的路由注册(使用router)
@@ -66,8 +118,16 @@ void UserController::initRoutes(Router *router)
     // 注册路由:"GET"+"/api/user/info"-->UserController::handleGetUserInfo
     router->addRoute("GET", "/api/user/info", UserController::handleGetUserInfo);
 
+    // 注册路由:"GET"+"/api/user/list"-->UserController::handleListUsers
+    router->addRoute("GET", "/api/user/list", UserController::handleListUsers);
+
     // 注册路由:"POST"+"/api/user/update"-->UserController::handleUpdateUser
     router->addRoute("POST", "/api/user/update", UserController::handleUpdateUser);
+
+    // 注册路由:"POST"+"/api/user/change-password"-->UserController::handleChangePassword
+    router->addRoute("POST", "/api/user/change-password", UserController::handleChangePassword);
+
+    router->addRoute("DELETE", "/api/user", UserController::handleDeleteUser);
 }
 
 // 负责"/api/user/add"的接口入口函数
@@ -153,25 +213,23 @@ void UserController::handleLogin(const HttpRequest &req, HttpResponse &res)
     // 核心调用：执行登录验证
     if (UserService::login(username, password, user))
     {
+        Json::Value response;
+        response["code"] = 200;
+        response["msg"] = "登录成功";
+        response["data"]["id"] = user.id;
+        response["data"]["username"] = user.username;
+        response["data"]["role"] = user.role;
+        response["data"]["permission_level"] = user.permission_level;
+        response["data"]["account_status"] = user.account_status;
+
+        Json::FastWriter writer;
         res.statusCode = 200;
-        // 登录成功，给前端返回用户信息（包含状态）
-        res.body = R"({
-            "code": 200, 
-            "msg": "登录成功", 
-            "data": {
-                "id": )" +
-                   std::to_string(user.id) + R"(,
-                "username": ")" +
-                   user.username + R"(",
-                "role": ")" +
-                   user.role + R"("
-            }
-        })";
+        res.body = writer.write(response);
     }
     else
     {
         res.statusCode = 401; // 401 Unauthorized
-        res.body = R"({"code": 401, "msg": "用户名不存在或密码错误"})";
+        res.body = R"({"code": 401, "msg": "用户名不存在、密码错误或账号已被禁用"})";
     }
 }
 
@@ -210,6 +268,8 @@ void UserController::handleGetUserInfo(const HttpRequest &req, HttpResponse &res
         data["location"] = user.location;
         data["timezone"] = user.timezone;
         data["role"] = user.role;
+        data["permission_level"] = user.permission_level;
+        data["account_status"] = user.account_status;
         data["bio"] = user.bio;
         data["last_login"] = user.last_login;
 
@@ -225,6 +285,111 @@ void UserController::handleGetUserInfo(const HttpRequest &req, HttpResponse &res
         res.statusCode = 404;
         res.body = R"({"code": 404, "msg": "用户不存在"})";
     }
+}
+
+void UserController::handleListUsers(const HttpRequest &req, HttpResponse &res)
+{
+    OperatorContext operator_context;
+    std::string auth_error;
+    if (!AuthService::getOperatorContext(req, operator_context, auth_error))
+    {
+        res.statusCode = authErrorStatusCode(auth_error);
+        res.body = std::string("{\"code\": ") + std::to_string(res.statusCode) + ", \"msg\": \"" + auth_error + "\"}";
+        return;
+    }
+
+    if (!operator_context.is_admin)
+    {
+        res.statusCode = 403;
+        res.body = R"({"code": 403, "msg": "权限不足，仅管理员可查看用户列表"})";
+        return;
+    }
+
+    UserListFilter filter;
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("username");
+    if (it != req.queryParams.end())
+    {
+        filter.username = it->second;
+    }
+
+    it = req.queryParams.find("employee_id");
+    if (it != req.queryParams.end())
+    {
+        filter.employee_id = it->second;
+    }
+
+    it = req.queryParams.find("status");
+    if (it != req.queryParams.end() && !it->second.empty())
+    {
+        if (it->second != "active" && it->second != "disabled")
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "status 仅支持 active 或 disabled"})";
+            return;
+        }
+        filter.status = it->second;
+    }
+
+    it = req.queryParams.find("permission_level");
+    if (it != req.queryParams.end() && !it->second.empty())
+    {
+        int permission_level = -1;
+        if (!parseIntParam(it->second, permission_level) ||
+            (permission_level != 0 && permission_level != 1))
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "permission_level 仅支持 0 或 1"})";
+            return;
+        }
+        filter.permission_level = permission_level;
+    }
+
+    it = req.queryParams.find("limit");
+    if (it != req.queryParams.end() && !it->second.empty())
+    {
+        if (!parseIntParam(it->second, filter.limit) || filter.limit < 1 || filter.limit > 100)
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "limit 取值范围必须在 1 到 100 之间"})";
+            return;
+        }
+    }
+
+    it = req.queryParams.find("offset");
+    if (it != req.queryParams.end() && !it->second.empty())
+    {
+        if (!parseIntParam(it->second, filter.offset) || filter.offset < 0)
+        {
+            res.statusCode = 400;
+            res.body = R"({"code": 400, "msg": "offset 必须大于等于 0"})";
+            return;
+        }
+    }
+
+    std::vector<UserEntity> users;
+    int total = 0;
+    if (!UserService::listUsers(filter, users, total))
+    {
+        res.statusCode = 500;
+        res.body = R"({"code": 500, "msg": "获取用户列表失败"})";
+        return;
+    }
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "获取用户列表成功";
+    response["data"]["total"] = total;
+    response["data"]["limit"] = filter.limit;
+    response["data"]["offset"] = filter.offset;
+    response["data"]["items"] = Json::Value(Json::arrayValue);
+    for (std::size_t i = 0; i < users.size(); ++i)
+    {
+        response["data"]["items"].append(buildUserListItemJson(users[i]));
+    }
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
 }
 
 // 负责"/api/user/update"的接口入口函数
@@ -288,4 +453,109 @@ void UserController::handleUpdateUser(const HttpRequest &req, HttpResponse &res)
         res.statusCode = 500;
         res.body = R"({"code": 500, "msg": "修改失败，请检查工号是否已被其他人占用"})";
     }
+}
+
+void UserController::handleChangePassword(const HttpRequest &req, HttpResponse &res)
+{
+    Json::Value root;
+    if (!parseJsonObjectBody(req.body, root, res))
+    {
+        return;
+    }
+
+    std::string username = root["username"].asString();
+    std::string old_password = root["old_password"].asString();
+    std::string new_password = root["new_password"].asString();
+
+    if (username.empty() || old_password.empty() || new_password.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "username、old_password、new_password 为必填项"})";
+        return;
+    }
+
+    std::string error_message;
+    if (UserService::changePassword(username, old_password, new_password, error_message))
+    {
+        res.statusCode = 200;
+        res.body = R"({"code": 200, "msg": "密码修改成功"})";
+        return;
+    }
+
+    if (error_message == "账号不存在或已被禁用")
+    {
+        res.statusCode = 403;
+    }
+    else
+    {
+        res.statusCode = 400;
+    }
+
+    Json::Value response;
+    response["code"] = res.statusCode;
+    response["msg"] = error_message.empty() ? "密码修改失败" : error_message;
+
+    Json::FastWriter writer;
+    res.body = writer.write(response);
+}
+
+void UserController::handleDeleteUser(const HttpRequest &req, HttpResponse &res)
+{
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("username");
+    if (it == req.queryParams.end() || it->second.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "缺少 username 参数"})";
+        return;
+    }
+
+    std::string target_username = it->second;
+
+    OperatorContext operator_context;
+    std::string auth_error;
+    if (!AuthService::getOperatorContext(req, operator_context, auth_error))
+    {
+        res.statusCode = authErrorStatusCode(auth_error);
+        res.body = std::string("{\"code\": ") + std::to_string(res.statusCode) + ", \"msg\": \"" + auth_error + "\"}";
+        return;
+    }
+
+    if (!operator_context.is_admin)
+    {
+        res.statusCode = 403;
+        res.body = R"({"code": 403, "msg": "只有管理员可以禁用用户"})";
+        return;
+    }
+
+    if (operator_context.username == target_username)
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "管理员不能禁用自己"})";
+        return;
+    }
+
+    UserEntity target_user;
+    if (!UserService::getUserInfo(target_username, target_user))
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "目标用户不存在"})";
+        return;
+    }
+
+    if (!UserService::disableUser(target_username))
+    {
+        res.statusCode = 500;
+        res.body = R"({"code": 500, "msg": "用户禁用失败"})";
+        return;
+    }
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "用户已禁用";
+    response["data"]["username"] = target_username;
+    response["data"]["account_status"] = "disabled";
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
 }

@@ -98,7 +98,7 @@ bool TaskDao::getTaskById(long long task_id, TaskEntity &out_task)
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, input_video_id, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
-                      "FROM tasks WHERE id = " +
+                      "FROM tasks WHERE is_deleted = 0 AND id = " +
                       std::to_string(task_id) + ";";
 
     MYSQL_RES *res = db->query(sql);
@@ -124,7 +124,9 @@ bool TaskDao::updateTaskStatus(long long task_id, const std::string &status)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) + "' WHERE id = " + std::to_string(task_id) + ";";
+    std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) +
+                      "' WHERE cancel_requested = 0 AND status <> 'CANCELLED' AND id = " +
+                      std::to_string(task_id) + ";";
     return db->update(sql);
 }
 
@@ -132,7 +134,9 @@ bool TaskDao::markTaskStarted(long long task_id, const std::string &status)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) + "', started_at = NOW() WHERE id = " + std::to_string(task_id) + ";";
+    std::string sql = "UPDATE tasks SET status = '" + escapeSql(status) +
+                      "', started_at = NOW() WHERE cancel_requested = 0 AND status <> 'CANCELLED' AND id = " +
+                      std::to_string(task_id) + ";";
     return db->update(sql);
 }
 
@@ -176,6 +180,87 @@ bool TaskDao::markTaskRejected(long long task_id, const std::string &status, con
     return db->update(sql);
 }
 
+bool TaskDao::softDeleteTask(long long task_id, const std::string &deleted_by)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "UPDATE tasks SET is_deleted = 1, deleted_at = NOW(), deleted_by = '" +
+                      escapeSql(deleted_by) + "' WHERE is_deleted = 0 AND id = " + std::to_string(task_id) + ";";
+    return db->update(sql);
+}
+
+bool TaskDao::markTaskCancelled(long long task_id)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "UPDATE tasks SET status = 'CANCELLED', cancel_requested = 1, cancelled_at = NOW(), "
+                      "finished_at = NOW(), error_message = '任务已被用户取消' "
+                      "WHERE is_deleted = 0 AND id = " +
+                      std::to_string(task_id) + ";";
+    return db->update(sql);
+}
+
+bool TaskDao::markTaskCancelled(const TaskEntity &task)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "UPDATE tasks SET status = 'CANCELLED', output_video_path = '', "
+                      "video_duration = " + std::to_string(task.video_duration) +
+                      ", video_width = " + std::to_string(task.video_width) +
+                      ", video_height = " + std::to_string(task.video_height) +
+                      ", video_fps = " + std::to_string(task.video_fps) +
+                      ", processed_frame_count = " + std::to_string(task.processed_frame_count) +
+                      ", detection_count = " + std::to_string(task.detection_count) +
+                      ", real_inference_executed = " + std::to_string(task.real_inference_executed ? 1 : 0) +
+                      ", result_video_generated = 0"
+                      ", used_model_name = '" + escapeSql(task.used_model_name) +
+                      "', used_model_framework = '" + escapeSql(task.used_model_framework) +
+                      "', video_build_mode = '" + escapeSql(task.video_build_mode) +
+                      "', inference_runtime_message = '" + escapeSql(task.inference_runtime_message) +
+                      "', result_summary = '" + escapeSql(task.result_summary) +
+                      "', error_message = '任务已被用户取消', cancel_requested = 1, "
+                      "cancelled_at = COALESCE(cancelled_at, NOW()), finished_at = NOW() "
+                      "WHERE is_deleted = 0 AND id = " +
+                      std::to_string(task.id) + ";";
+    return db->update(sql);
+}
+
+bool TaskDao::markTaskCancelRequested(long long task_id)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "UPDATE tasks SET cancel_requested = 1, cancelled_at = NOW(), "
+                      "error_message = '任务取消请求已记录，等待处理线程安全退出' "
+                      "WHERE is_deleted = 0 AND id = " +
+                      std::to_string(task_id) + ";";
+    return db->update(sql);
+}
+
+bool TaskDao::isTaskCancellationRequested(long long task_id)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "SELECT cancel_requested FROM tasks WHERE is_deleted = 0 AND id = " +
+                      std::to_string(task_id) + " LIMIT 1;";
+
+    MYSQL_RES *res = db->query(sql);
+    if (res == nullptr)
+    {
+        return false;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (row == nullptr)
+    {
+        mysql_free_result(res);
+        return false;
+    }
+
+    bool requested = row[0] ? std::stoi(row[0]) != 0 : false;
+    mysql_free_result(res);
+    return requested;
+}
+
 std::vector<TaskEntity> TaskDao::listTasks(const TaskListFilter &filter)
 {
     std::vector<TaskEntity> tasks;
@@ -188,7 +273,7 @@ std::vector<TaskEntity> TaskDao::listTasks(const TaskListFilter &filter)
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, input_video_id, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
-                      "FROM tasks WHERE 1=1";
+                      "FROM tasks WHERE is_deleted = 0";
 
     if (!filter.status.empty())
     {
@@ -230,7 +315,7 @@ TaskStats TaskDao::getTaskStats()
     MYSQL_RES *overview_res = db->query("SELECT COUNT(*), "
                                         "SUM(CASE WHEN result_video_generated = 1 THEN 1 ELSE 0 END), "
                                         "SUM(CASE WHEN real_inference_executed = 1 THEN 1 ELSE 0 END) "
-                                        "FROM tasks;");
+                                        "FROM tasks WHERE is_deleted = 0;");
     if (overview_res != nullptr)
     {
         MYSQL_ROW row = mysql_fetch_row(overview_res);
@@ -243,7 +328,7 @@ TaskStats TaskDao::getTaskStats()
         mysql_free_result(overview_res);
     }
 
-    MYSQL_RES *status_res = db->query("SELECT status, COUNT(*) FROM tasks GROUP BY status;");
+    MYSQL_RES *status_res = db->query("SELECT status, COUNT(*) FROM tasks WHERE is_deleted = 0 GROUP BY status;");
     if (status_res != nullptr)
     {
         MYSQL_ROW row = nullptr;
@@ -256,7 +341,7 @@ TaskStats TaskDao::getTaskStats()
         mysql_free_result(status_res);
     }
 
-    MYSQL_RES *type_res = db->query("SELECT task_type, COUNT(*) FROM tasks GROUP BY task_type;");
+    MYSQL_RES *type_res = db->query("SELECT task_type, COUNT(*) FROM tasks WHERE is_deleted = 0 GROUP BY task_type;");
     if (type_res != nullptr)
     {
         MYSQL_ROW row = nullptr;

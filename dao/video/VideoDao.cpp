@@ -70,7 +70,7 @@ bool VideoDao::getVideoById(int video_id, VideoEntity &out_video)
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, submitted_by, original_filename, stored_filename, stored_path, file_size_bytes, duration, width, height, fps, uploaded_at "
-                      "FROM videos WHERE id = " + std::to_string(video_id) + ";";
+                      "FROM videos WHERE is_deleted = 0 AND id = " + std::to_string(video_id) + ";";
     MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
@@ -94,7 +94,7 @@ bool VideoDao::getVideoByStoredPath(const std::string &stored_path, VideoEntity 
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, submitted_by, original_filename, stored_filename, stored_path, file_size_bytes, duration, width, height, fps, uploaded_at "
-                      "FROM videos WHERE stored_path = '" + escapeSql(stored_path) + "' LIMIT 1;";
+                      "FROM videos WHERE is_deleted = 0 AND stored_path = '" + escapeSql(stored_path) + "' LIMIT 1;";
     MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
@@ -121,7 +121,7 @@ std::vector<VideoEntity> VideoDao::listVideos(const VideoListFilter &filter)
 
     int limit = filter.limit <= 0 ? 20 : filter.limit;
     std::string sql = "SELECT id, submitted_by, original_filename, stored_filename, stored_path, file_size_bytes, duration, width, height, fps, uploaded_at "
-                      "FROM videos WHERE 1=1";
+                      "FROM videos WHERE is_deleted = 0";
 
     if (!filter.submitted_by.empty())
     {
@@ -155,7 +155,7 @@ int VideoDao::countTasksByVideoId(int video_id)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    std::string sql = "SELECT COUNT(*) FROM tasks WHERE input_video_id = " + std::to_string(video_id) + ";";
+    std::string sql = "SELECT COUNT(*) FROM tasks WHERE is_deleted = 0 AND input_video_id = " + std::to_string(video_id) + ";";
     MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
@@ -166,4 +166,33 @@ int VideoDao::countTasksByVideoId(int video_id)
     int count = (row != nullptr && row[0] != nullptr) ? std::stoi(row[0]) : 0;
     mysql_free_result(res);
     return count;
+}
+
+int VideoDao::countActiveTasksByVideoId(int video_id)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "SELECT COUNT(*) FROM tasks WHERE is_deleted = 0 AND input_video_id = " +
+                      std::to_string(video_id) +
+                      " AND status IN ('PENDING', 'QUEUED', 'PROCESSING');";
+    MYSQL_RES *res = db->query(sql);
+    if (res == nullptr)
+    {
+        return 0;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    int count = (row != nullptr && row[0] != nullptr) ? std::stoi(row[0]) : 0;
+    mysql_free_result(res);
+    return count;
+}
+
+bool VideoDao::softDeleteVideo(int video_id, const std::string &deleted_by)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "UPDATE videos SET is_deleted = 1, deleted_at = NOW(), deleted_by = '" +
+                      escapeSql(deleted_by) + "' WHERE is_deleted = 0 AND id = " +
+                      std::to_string(video_id) + ";";
+    return db->update(sql);
 }

@@ -1,6 +1,7 @@
 #include "controller/video/VideoController.h"
 
 #include "entity/TaskEntity.h"
+#include "service/auth/AuthService.h"
 #include "service/task/TaskService.h"
 #include "service/video/VideoLibraryService.h"
 #include "service/video/VideoUploadService.h"
@@ -241,6 +242,44 @@ bool parsePositiveInt(const std::string &text, int &out_value)
     }
     return out_value > 0;
 }
+
+bool parsePositiveLongLong(const std::string &text, long long &out_value)
+{
+    try
+    {
+        out_value = std::stoll(text);
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return out_value > 0;
+}
+
+bool isTerminalTaskStatus(const std::string &status)
+{
+    return status == TaskStatus::COMPLETED ||
+           status == TaskStatus::CANCELLED ||
+           status.find("FAILED_") == 0 ||
+           status.find("REJECTED_") == 0;
+}
+
+bool isTaskRunningOrWaiting(const std::string &status)
+{
+    return status == TaskStatus::PENDING ||
+           status == TaskStatus::QUEUED ||
+           status == TaskStatus::PROCESSING;
+}
+
+int authErrorStatusCode(const std::string &error_message)
+{
+    if (error_message.find("禁用") != std::string::npos ||
+        error_message.find("权限等级非法") != std::string::npos)
+    {
+        return 403;
+    }
+    return 401;
+}
 }
 
 void VideoController::initRoutes(Router *router)
@@ -248,11 +287,14 @@ void VideoController::initRoutes(Router *router)
     router->addRoute("POST", "/api/video/upload", VideoController::handleUploadVideo);
     router->addRoute("GET", "/api/video/list", VideoController::handleListVideos);
     router->addRoute("GET", "/api/video/info", VideoController::handleGetVideoInfo);
+    router->addRoute("DELETE", "/api/video", VideoController::handleDeleteVideo);
     router->addRoute("GET", "/api/video/preview", VideoController::handlePreviewVideo);
     router->addRoute("POST", "/api/task/submit", VideoController::handleSubmitTask);
     router->addRoute("GET", "/api/task/status", VideoController::handleGetTaskStatus);
     router->addRoute("GET", "/api/task/list", VideoController::handleListTasks);
     router->addRoute("GET", "/api/task/stats", VideoController::handleGetTaskStats);
+    router->addRoute("DELETE", "/api/task", VideoController::handleDeleteTask);
+    router->addRoute("POST", "/api/task/cancel", VideoController::handleCancelTask);
     router->addRoute("GET", "/api/video/result", VideoController::handleGetResultVideo);
 }
 
@@ -562,6 +604,176 @@ void VideoController::handleGetTaskStats(const HttpRequest &req, HttpResponse &r
     res.body = writer.write(response);
 }
 
+void VideoController::handleDeleteTask(const HttpRequest &req, HttpResponse &res)
+{
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("id");
+    if (it == req.queryParams.end() || it->second.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "缺少任务 id 参数"})";
+        return;
+    }
+
+    long long task_id = 0;
+    if (!parsePositiveLongLong(it->second, task_id))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "任务 id 格式错误"})";
+        return;
+    }
+
+    OperatorContext operator_context;
+    std::string auth_error;
+    if (!AuthService::getOperatorContext(req, operator_context, auth_error))
+    {
+        res.statusCode = authErrorStatusCode(auth_error);
+        res.body = std::string("{\"code\": ") + std::to_string(res.statusCode) + ", \"msg\": \"" + auth_error + "\"}";
+        return;
+    }
+
+    TaskEntity task;
+    if (!TaskService::getTaskById(task_id, task))
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "任务不存在或已删除"})";
+        return;
+    }
+
+    if (!AuthService::canDeleteOwnedResource(operator_context, task.submitted_by))
+    {
+        res.statusCode = 403;
+        res.body = R"({"code": 403, "msg": "权限不足，只能删除自己提交的任务记录"})";
+        return;
+    }
+
+    if (!isTerminalTaskStatus(task.status))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "PENDING、QUEUED、PROCESSING 状态任务不允许直接删除，请先取消任务"})";
+        return;
+    }
+
+    if (!TaskService::softDeleteTaskRecord(task_id, operator_context.username))
+    {
+        res.statusCode = 500;
+        res.body = R"({"code": 500, "msg": "任务记录删除失败"})";
+        return;
+    }
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "任务记录删除成功";
+    response["data"]["task_id"] = Json::Int64(task_id);
+    response["data"]["delete_mode"] = "soft_delete";
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
+}
+
+void VideoController::handleCancelTask(const HttpRequest &req, HttpResponse &res)
+{
+    Json::Value root;
+    if (!parseJsonObjectBody(req.body, root, res))
+    {
+        return;
+    }
+
+    long long task_id = root.isMember("task_id") ? root["task_id"].asInt64() : 0;
+    if (task_id <= 0)
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "task_id 必须大于 0"})";
+        return;
+    }
+
+    std::string operator_username = root["operator_username"].asString();
+    if (operator_username.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "operator_username 为必填项"})";
+        return;
+    }
+
+    OperatorContext operator_context;
+    std::string auth_error;
+    if (!AuthService::getOperatorContext(req, operator_context, auth_error))
+    {
+        res.statusCode = authErrorStatusCode(auth_error);
+        res.body = std::string("{\"code\": ") + std::to_string(res.statusCode) + ", \"msg\": \"" + auth_error + "\"}";
+        return;
+    }
+
+    TaskEntity task;
+    if (!TaskService::getTaskById(task_id, task))
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "任务不存在或已删除"})";
+        return;
+    }
+
+    if (!AuthService::canDeleteOwnedResource(operator_context, task.submitted_by))
+    {
+        res.statusCode = 403;
+        res.body = R"({"code": 403, "msg": "权限不足，只能取消自己提交的任务"})";
+        return;
+    }
+
+    if (task.status == TaskStatus::CANCELLED)
+    {
+        Json::Value response;
+        response["code"] = 200;
+        response["msg"] = "任务已取消";
+        response["data"]["task_id"] = Json::Int64(task_id);
+        response["data"]["status"] = TaskStatus::CANCELLED;
+
+        Json::FastWriter writer;
+        res.statusCode = 200;
+        res.body = writer.write(response);
+        return;
+    }
+
+    if (!isTaskRunningOrWaiting(task.status))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "任务已结束，不需要取消"})";
+        return;
+    }
+
+    std::string result_status;
+    std::string result_message;
+    bool success = false;
+    if (task.status == TaskStatus::PENDING || task.status == TaskStatus::QUEUED)
+    {
+        success = TaskService::markTaskCancelled(task_id);
+        result_status = TaskStatus::CANCELLED;
+        result_message = "任务已取消";
+    }
+    else
+    {
+        success = TaskService::requestTaskCancellation(task_id);
+        result_status = task.status;
+        result_message = "任务取消请求已提交，处理线程将尽快停止";
+    }
+
+    if (!success)
+    {
+        res.statusCode = 500;
+        res.body = R"({"code": 500, "msg": "任务取消失败"})";
+        return;
+    }
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = result_message;
+    response["data"]["task_id"] = Json::Int64(task_id);
+    response["data"]["status"] = result_status;
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
+}
+
 void VideoController::handleListVideos(const HttpRequest &req, HttpResponse &res)
 {
     VideoListFilter filter;
@@ -639,6 +851,81 @@ void VideoController::handleGetVideoInfo(const HttpRequest &req, HttpResponse &r
     response["data"] = buildVideoJson(info.video);
     response["data"]["has_task_usage"] = info.has_task_usage;
     response["data"]["task_usage_count"] = info.task_usage_count;
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
+}
+
+void VideoController::handleDeleteVideo(const HttpRequest &req, HttpResponse &res)
+{
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("id");
+    if (it == req.queryParams.end() || it->second.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "缺少视频 id 参数"})";
+        return;
+    }
+
+    int video_id = 0;
+    if (!parsePositiveInt(it->second, video_id))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "视频 id 格式错误"})";
+        return;
+    }
+
+    OperatorContext operator_context;
+    std::string auth_error;
+    if (!AuthService::getOperatorContext(req, operator_context, auth_error))
+    {
+        res.statusCode = authErrorStatusCode(auth_error);
+        res.body = std::string("{\"code\": ") + std::to_string(res.statusCode) + ", \"msg\": \"" + auth_error + "\"}";
+        return;
+    }
+
+    VideoInfoView info;
+    if (!VideoLibraryService::getVideoInfo(video_id, info))
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "视频不存在或已删除"})";
+        return;
+    }
+
+    if (!AuthService::canDeleteOwnedResource(operator_context, info.video.submitted_by))
+    {
+        res.statusCode = 403;
+        res.body = R"({"code": 403, "msg": "权限不足，只能删除自己上传的视频"})";
+        return;
+    }
+
+    int active_task_count = VideoLibraryService::countActiveTasksByVideoId(video_id);
+    if (active_task_count > 0)
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "视频存在待处理或处理中的任务，暂不允许删除"})";
+        return;
+    }
+
+    if (!operator_context.is_admin && info.task_usage_count > 0)
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "视频已被历史任务引用，普通操作员不能删除"})";
+        return;
+    }
+
+    if (!VideoLibraryService::softDeleteVideoRecord(video_id, operator_context.username))
+    {
+        res.statusCode = 500;
+        res.body = R"({"code": 500, "msg": "视频删除失败"})";
+        return;
+    }
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "视频删除成功";
+    response["data"]["video_id"] = video_id;
+    response["data"]["delete_mode"] = "soft_delete";
 
     Json::FastWriter writer;
     res.statusCode = 200;

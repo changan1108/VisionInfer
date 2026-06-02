@@ -26,6 +26,14 @@ bool UserService::login(const std::string &username, const std::string &password
         return false;
     }
 
+    UserPermissionInfo permission_info;
+    if (!UserDao::getUserPermissionInfo(username, permission_info) ||
+        permission_info.account_status != "active")
+    {
+        std::cerr << "[UserService] 登录失败：账号已被禁用!" << std::endl;
+        return false;
+    }
+
     // 2. 比对密码
     if (out_user.password != password)
     {
@@ -53,6 +61,11 @@ bool UserService::getUserInfo(const std::string &username, UserEntity &out_user)
     return false;
 }
 
+bool UserService::listUsers(const UserListFilter &filter, std::vector<UserEntity> &out_users, int &out_total)
+{
+    return UserDao::listUsers(filter, out_users, out_total);
+}
+
 // 更新用户信息
 bool UserService::updateUserInfo(const UserEntity &user)
 {
@@ -63,4 +76,48 @@ bool UserService::updateUserInfo(const UserEntity &user)
     }
     // 直接调用 DAO 执行更新
     return UserDao::updateUser(user);
+}
+
+bool UserService::changePassword(const std::string &username,
+                                 const std::string &old_password,
+                                 const std::string &new_password,
+                                 std::string &error_message)
+{
+    if (new_password.length() < 6)
+    {
+        error_message = "新密码长度不能少于6位";
+        return false;
+    }
+
+    UserEntity user;
+    if (!UserDao::getUserByUsername(username, user) || user.account_status != "active")
+    {
+        error_message = "账号不存在或已被禁用";
+        return false;
+    }
+
+    if (user.password != old_password)
+    {
+        error_message = "原密码错误";
+        return false;
+    }
+
+    if (!UserDao::updatePassword(username, new_password))
+    {
+        error_message = "密码修改失败";
+        return false;
+    }
+
+    error_message.clear();
+    return true;
+}
+
+bool UserService::disableUser(const std::string &username)
+{
+    if (username.empty())
+    {
+        return false;
+    }
+
+    return UserDao::disableUser(username);
 }

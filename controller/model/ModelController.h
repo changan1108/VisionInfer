@@ -14,6 +14,7 @@ private:
     static void handleSwitchModel(const HttpRequest &req, HttpResponse &res);
     static void handleGetCurrentModel(const HttpRequest &req, HttpResponse &res);
     static void handleListModels(const HttpRequest &req, HttpResponse &res);
+    static void handleDeleteModel(const HttpRequest &req, HttpResponse &res);
 };
 
 #endif // MODEL_CONTROLLER_H

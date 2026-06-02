@@ -15,8 +15,11 @@ private:
     static void handleGetTaskStatus(const HttpRequest &req, HttpResponse &res);
     static void handleListTasks(const HttpRequest &req, HttpResponse &res);
     static void handleGetTaskStats(const HttpRequest &req, HttpResponse &res);
+    static void handleDeleteTask(const HttpRequest &req, HttpResponse &res);
+    static void handleCancelTask(const HttpRequest &req, HttpResponse &res);
     static void handleListVideos(const HttpRequest &req, HttpResponse &res);
     static void handleGetVideoInfo(const HttpRequest &req, HttpResponse &res);
+    static void handleDeleteVideo(const HttpRequest &req, HttpResponse &res);
     static void handlePreviewVideo(const HttpRequest &req, HttpResponse &res);
     static void handleGetResultVideo(const HttpRequest &req, HttpResponse &res);
 };

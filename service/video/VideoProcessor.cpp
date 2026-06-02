@@ -21,7 +21,9 @@ extern "C"
 
 #include <chrono>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -48,6 +50,7 @@ struct FrameExtractionResult
     std::uint64_t inference_postprocess_duration_ms = 0;
     std::uint64_t inference_draw_duration_ms = 0;
     std::uint64_t encode_write_duration_ms = 0;
+    bool cancelled = false;
 };
 
 void markTaskFailure(TaskEntity &task, const char *status, const std::string &error_message)
@@ -58,6 +61,11 @@ void markTaskFailure(TaskEntity &task, const char *status, const std::string &er
     {
         task.result_summary = error_message;
     }
+}
+
+bool shouldCancelTask(const std::function<bool()> &is_cancel_requested)
+{
+    return is_cancel_requested && is_cancel_requested();
 }
 
 bool pathExists(const std::string &path)
@@ -173,7 +181,8 @@ bool extractFrames(const std::string &path,
                    const std::string &output_path,
                    const InferenceModelContext &model_context,
                    std::string &encode_error_message,
-                   FrameExtractionResult &result)
+                   FrameExtractionResult &result,
+                   const std::function<bool()> &is_cancel_requested)
 {
     if (frame_interval <= 0 || output_path.empty())
     {
@@ -465,6 +474,14 @@ bool extractFrames(const std::string &path,
     int extracted_index = 0;
     int total_detection_count = 0;
 
+    auto markCancelled = [&]()
+    {
+        result.cancelled = true;
+        result.extracted_frame_count = extracted_index;
+        result.total_detection_count = total_detection_count;
+        encode_error_message = "任务已被用户取消";
+    };
+
     auto writeEncodedPackets = [&]() -> bool
     {
         while (true)
@@ -496,6 +513,12 @@ bool extractFrames(const std::string &path,
     {
         while (true)
         {
+            if (shouldCancelTask(is_cancel_requested))
+            {
+                markCancelled();
+                return false;
+            }
+
             auto receive_started_at = std::chrono::steady_clock::now();
             int receive_result = avcodec_receive_frame(codec_context, decoded_frame);
             auto receive_finished_at = std::chrono::steady_clock::now();
@@ -512,6 +535,12 @@ bool extractFrames(const std::string &path,
 
             if (decoded_index % frame_interval == 0)
             {
+                if (shouldCancelTask(is_cancel_requested))
+                {
+                    markCancelled();
+                    return false;
+                }
+
                 auto render_scale_started_at = std::chrono::steady_clock::now();
                 sws_scale(sws_context,
                           decoded_frame->data,
@@ -548,6 +577,12 @@ bool extractFrames(const std::string &path,
                 inference_frame_buffer.linesize = inference_rgb_frame->linesize[0];
                 inference_frame_buffer.data = inference_rgb_frame->data[0];
 
+                if (shouldCancelTask(is_cancel_requested))
+                {
+                    markCancelled();
+                    return false;
+                }
+
                 InferenceResult inference_result;
                 if (!YoloInference::processFrame(render_frame_buffer,
                                                 inference_frame_buffer,
@@ -565,6 +600,12 @@ bool extractFrames(const std::string &path,
                 result.inference_forward_duration_ms += inference_result.forward_duration_ms;
                 result.inference_postprocess_duration_ms += inference_result.postprocess_duration_ms;
                 result.inference_draw_duration_ms += inference_result.draw_duration_ms;
+
+                if (shouldCancelTask(is_cancel_requested))
+                {
+                    markCancelled();
+                    return false;
+                }
 
                 if (av_frame_make_writable(encode_frame) < 0)
                 {
@@ -607,6 +648,14 @@ bool extractFrames(const std::string &path,
 
     while (av_read_frame(format_context, packet) >= 0)
     {
+        if (shouldCancelTask(is_cancel_requested))
+        {
+            markCancelled();
+            av_packet_unref(packet);
+            cleanup();
+            return false;
+        }
+
         if (packet->stream_index == video_stream_index)
         {
             if (avcodec_send_packet(codec_context, packet) < 0)
@@ -624,6 +673,13 @@ bool extractFrames(const std::string &path,
             }
         }
         av_packet_unref(packet);
+    }
+
+    if (shouldCancelTask(is_cancel_requested))
+    {
+        markCancelled();
+        cleanup();
+        return false;
     }
 
     avcodec_send_packet(codec_context, nullptr);
@@ -680,8 +736,21 @@ bool VideoProcessor::hasSufficientDiskSpaceForTask(const TaskEntity &task, std::
 
 bool VideoProcessor::processTask(const TaskEntity &task, TaskEntity &out_result)
 {
+    return VideoProcessor::processTask(task, out_result, std::function<bool()>());
+}
+
+bool VideoProcessor::processTask(const TaskEntity &task,
+                                 TaskEntity &out_result,
+                                 const std::function<bool()> &is_cancel_requested)
+{
     auto task_started_at = std::chrono::steady_clock::now();
     out_result = task;
+
+    if (shouldCancelTask(is_cancel_requested))
+    {
+        markTaskFailure(out_result, TaskStatus::CANCELLED, "任务已被用户取消");
+        return false;
+    }
 
     if (!pathExists(task.input_video_path))
     {
@@ -707,6 +776,16 @@ bool VideoProcessor::processTask(const TaskEntity &task, TaskEntity &out_result)
     }
     auto metadata_finished_at = std::chrono::steady_clock::now();
 
+    if (shouldCancelTask(is_cancel_requested))
+    {
+        out_result.video_duration = metadata.duration_seconds;
+        out_result.video_width = metadata.width;
+        out_result.video_height = metadata.height;
+        out_result.video_fps = metadata.fps;
+        markTaskFailure(out_result, TaskStatus::CANCELLED, "任务已被用户取消");
+        return false;
+    }
+
     InferenceModelContext model_context;
     std::string model_error_message;
     if (!YoloInference::buildModelContext(task.model_id, model_context, model_error_message))
@@ -715,6 +794,18 @@ bool VideoProcessor::processTask(const TaskEntity &task, TaskEntity &out_result)
         return false;
     }
     model_context.confidence_threshold = static_cast<float>(task.confidence_threshold);
+
+    if (shouldCancelTask(is_cancel_requested))
+    {
+        out_result.video_duration = metadata.duration_seconds;
+        out_result.video_width = metadata.width;
+        out_result.video_height = metadata.height;
+        out_result.video_fps = metadata.fps;
+        out_result.used_model_name = model_context.model_name;
+        out_result.used_model_framework = model_context.framework;
+        markTaskFailure(out_result, TaskStatus::CANCELLED, "任务已被用户取消");
+        return false;
+    }
 
     FrameExtractionResult extraction_result;
     std::string encode_error_message;
@@ -726,8 +817,34 @@ bool VideoProcessor::processTask(const TaskEntity &task, TaskEntity &out_result)
                        out_result.output_video_path,
                        model_context,
                        encode_error_message,
-                       extraction_result))
+                       extraction_result,
+                       is_cancel_requested))
     {
+        if (extraction_result.cancelled)
+        {
+            std::remove(out_result.output_video_path.c_str());
+            out_result.output_video_path.clear();
+            out_result.video_duration = metadata.duration_seconds;
+            out_result.video_width = metadata.width;
+            out_result.video_height = metadata.height;
+            out_result.video_fps = metadata.fps;
+            out_result.processed_frame_count = extraction_result.extracted_frame_count;
+            out_result.detection_count = extraction_result.total_detection_count;
+            out_result.real_inference_executed = extraction_result.real_inference_ran;
+            out_result.result_video_generated = false;
+            out_result.used_model_name = extraction_result.inference_model_name;
+            out_result.used_model_framework = extraction_result.inference_framework;
+            out_result.video_build_mode = "cancelled";
+            out_result.inference_runtime_message = extraction_result.inference_runtime_message;
+            std::ostringstream cancel_summary;
+            cancel_summary << "任务已取消，视频处理线程已安全退出；已处理帧数="
+                           << extraction_result.extracted_frame_count
+                           << "，总检测框数量=" << extraction_result.total_detection_count;
+            out_result.result_summary = cancel_summary.str();
+            markTaskFailure(out_result, TaskStatus::CANCELLED, "任务已被用户取消");
+            return false;
+        }
+
         if (!encode_error_message.empty())
         {
             markTaskFailure(out_result, TaskStatus::FAILED_ENCODE, encode_error_message);

@@ -19,6 +19,7 @@ constexpr const char *FAILED_INFERENCE = "FAILED_INFERENCE";
 constexpr const char *FAILED_ENCODE = "FAILED_ENCODE";
 constexpr const char *FAILED_OUTPUT_COPY = "FAILED_OUTPUT_COPY";
 constexpr const char *FAILED_RUNTIME = "FAILED_RUNTIME";
+constexpr const char *CANCELLED = "CANCELLED";
 }
 
 struct TaskEntity

@@ -155,11 +155,48 @@ TaskExecutionPoolSnapshot TaskService::getExecutionPoolSnapshot()
     return snapshot;
 }
 
+bool TaskService::softDeleteTaskRecord(long long task_id, const std::string &deleted_by)
+{
+    if (task_id <= 0 || deleted_by.empty())
+    {
+        return false;
+    }
+
+    return TaskDao::softDeleteTask(task_id, deleted_by);
+}
+
+bool TaskService::markTaskCancelled(long long task_id)
+{
+    if (task_id <= 0)
+    {
+        return false;
+    }
+
+    return TaskDao::markTaskCancelled(task_id);
+}
+
+bool TaskService::requestTaskCancellation(long long task_id)
+{
+    if (task_id <= 0)
+    {
+        return false;
+    }
+
+    return TaskDao::markTaskCancelRequested(task_id);
+}
+
 void TaskService::dispatchAsyncTask(const TaskEntity &task)
 {
     auto queued_at = std::chrono::steady_clock::now();
     getTaskDispatchThreadPool().enqueue([task, queued_at]()
                                         {
+        if (TaskDao::isTaskCancellationRequested(task.id))
+        {
+            SystemMonitor::instance().decrementPendingTasks();
+            TaskDao::markTaskCancelled(task.id);
+            return;
+        }
+
         TaskDao::updateTaskStatus(task.id, TaskStatus::QUEUED);
 
         try
@@ -200,22 +237,48 @@ void TaskService::enqueueVideoProcessingTask(const TaskEntity &task,
 
         try
         {
-            TaskDao::markTaskStarted(task.id, TaskStatus::PROCESSING);
-
-            TaskEntity processed_task;
-            bool success = VideoProcessor::processTask(task, processed_task);
-
-            if (success)
+            if (TaskDao::isTaskCancellationRequested(task.id))
             {
-                TaskDao::markTaskCompleted(processed_task);
-                SystemMonitor::instance().incrementCompletedTasks();
+                TaskDao::markTaskCancelled(task.id);
             }
             else
             {
-                TaskDao::markTaskFailed(task.id,
-                                        VideoProcessor::inferFailureStatus(processed_task),
-                                        processed_task.error_message.empty() ? "视频处理失败" : processed_task.error_message);
-                SystemMonitor::instance().incrementFailedTasks();
+                TaskDao::markTaskStarted(task.id, TaskStatus::PROCESSING);
+
+                TaskEntity processed_task;
+                bool success = VideoProcessor::processTask(task,
+                                                           processed_task,
+                                                           [task]()
+                                                           {
+                                                               return TaskDao::isTaskCancellationRequested(task.id);
+                                                           });
+
+                if (success && !TaskDao::isTaskCancellationRequested(task.id))
+                {
+                    TaskDao::markTaskCompleted(processed_task);
+                    SystemMonitor::instance().incrementCompletedTasks();
+                }
+                else if (processed_task.status == TaskStatus::CANCELLED ||
+                         TaskDao::isTaskCancellationRequested(task.id))
+                {
+                    if (processed_task.id <= 0)
+                    {
+                        processed_task = task;
+                    }
+                    processed_task.id = task.id;
+                    if (processed_task.result_summary.empty())
+                    {
+                        processed_task.result_summary = "任务已取消，处理线程已安全退出";
+                    }
+                    TaskDao::markTaskCancelled(processed_task);
+                }
+                else
+                {
+                    TaskDao::markTaskFailed(task.id,
+                                            VideoProcessor::inferFailureStatus(processed_task),
+                                            processed_task.error_message.empty() ? "视频处理失败" : processed_task.error_message);
+                    SystemMonitor::instance().incrementFailedTasks();
+                }
             }
         }
         catch (const std::exception &ex)

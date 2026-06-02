@@ -124,8 +124,8 @@ std::string HttpParser::buildResponse(const HttpResponse &res)
 
     // 3. 跨域支持 (CORS)：允许前端跨域访问我们的接口
     response_str += "Access-Control-Allow-Origin: *\r\n";
-    response_str += "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n";
-    response_str += "Access-Control-Allow-Headers: Content-Type, Authorization\r\n";
+    response_str += "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
+    response_str += "Access-Control-Allow-Headers: Content-Type, Authorization, X-Operator-Username\r\n";
     response_str += "Connection: close\r\n";
 
     // 4. 空行，标志着 Header 的结束和 Body 的开始

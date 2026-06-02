@@ -14,6 +14,7 @@ public:
     static bool getCurrentActiveModel(ModelEntity &out_model);
     static std::vector<ModelEntity> listModels();
     static ModelStats getModelStats();
+    static bool softDeleteModelRecord(int model_id, const std::string &deleted_by);
 };
 
 #endif // MODEL_SERVICE_H

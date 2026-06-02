@@ -14,6 +14,7 @@ public:
     static std::vector<ModelEntity> getAllModels();
     static bool deactivateAllModels();
     static bool activateModel(int model_id);
+    static bool softDeleteModel(int model_id, const std::string &deleted_by);
     static ModelStats getModelStats();
 };
 

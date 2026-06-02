@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "entity/ModelEntity.h"
+#include "service/auth/AuthService.h"
 #include "service/model/ModelService.h"
 #include "service/model/ModelUploadService.h"
 
@@ -159,6 +160,29 @@ bool parseBoolField(const std::string &input)
     return lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
 }
 
+bool parsePositiveInt(const std::string &text, int &out_value)
+{
+    try
+    {
+        out_value = std::stoi(text);
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return out_value > 0;
+}
+
+int authErrorStatusCode(const std::string &error_message)
+{
+    if (error_message.find("禁用") != std::string::npos ||
+        error_message.find("权限等级非法") != std::string::npos)
+    {
+        return 403;
+    }
+    return 401;
+}
+
 Json::Value buildModelJson(const ModelEntity &model)
 {
     Json::Value item;
@@ -181,6 +205,7 @@ void ModelController::initRoutes(Router *router)
     router->addRoute("POST", "/api/model/switch", ModelController::handleSwitchModel);
     router->addRoute("GET", "/api/model/current", ModelController::handleGetCurrentModel);
     router->addRoute("GET", "/api/model/list", ModelController::handleListModels);
+    router->addRoute("DELETE", "/api/model", ModelController::handleDeleteModel);
 }
 
 void ModelController::handleUploadModel(const HttpRequest &req, HttpResponse &res)
@@ -301,6 +326,73 @@ void ModelController::handleListModels(const HttpRequest &, HttpResponse &res)
         data.append(buildModelJson(*it));
     }
     response["data"] = data;
+
+    Json::FastWriter writer;
+    res.statusCode = 200;
+    res.body = writer.write(response);
+}
+
+void ModelController::handleDeleteModel(const HttpRequest &req, HttpResponse &res)
+{
+    std::unordered_map<std::string, std::string>::const_iterator it = req.queryParams.find("id");
+    if (it == req.queryParams.end() || it->second.empty())
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "缺少模型 id 参数"})";
+        return;
+    }
+
+    int model_id = 0;
+    if (!parsePositiveInt(it->second, model_id))
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "模型 id 格式错误"})";
+        return;
+    }
+
+    OperatorContext operator_context;
+    std::string auth_error;
+    if (!AuthService::getOperatorContext(req, operator_context, auth_error))
+    {
+        res.statusCode = authErrorStatusCode(auth_error);
+        res.body = std::string("{\"code\": ") + std::to_string(res.statusCode) + ", \"msg\": \"" + auth_error + "\"}";
+        return;
+    }
+
+    ModelEntity model;
+    if (!ModelService::getModelById(model_id, model))
+    {
+        res.statusCode = 404;
+        res.body = R"({"code": 404, "msg": "模型不存在或已删除"})";
+        return;
+    }
+
+    if (!AuthService::canDeleteOwnedResource(operator_context, model.uploaded_by))
+    {
+        res.statusCode = 403;
+        res.body = R"({"code": 403, "msg": "权限不足，只能删除自己上传的模型"})";
+        return;
+    }
+
+    if (model.is_active)
+    {
+        res.statusCode = 400;
+        res.body = R"({"code": 400, "msg": "当前激活模型不允许删除，请先切换到其他模型"})";
+        return;
+    }
+
+    if (!ModelService::softDeleteModelRecord(model_id, operator_context.username))
+    {
+        res.statusCode = 500;
+        res.body = R"({"code": 500, "msg": "模型删除失败"})";
+        return;
+    }
+
+    Json::Value response;
+    response["code"] = 200;
+    response["msg"] = "模型删除成功";
+    response["data"]["model_id"] = model_id;
+    response["data"]["delete_mode"] = "soft_delete";
 
     Json::FastWriter writer;
     res.statusCode = 200;

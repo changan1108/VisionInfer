@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     timezone VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '' COMMENT '时区',
     bio VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '' COMMENT '个人简介(20字左右)',
     role VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '' COMMENT '职能角色',
+    permission_level TINYINT NOT NULL DEFAULT 0 COMMENT '权限等级：0=普通操作员，1=管理员',
+    account_status VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'active' COMMENT '账号状态：active/disabled',
     PRIMARY KEY (id),
     UNIQUE KEY username (username),
     UNIQUE KEY employee_id (employee_id)
@@ -33,7 +35,11 @@ CREATE TABLE IF NOT EXISTS models (
     uploaded_by VARCHAR(64) DEFAULT '',
     uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uniq_model_name (model_name)
+    is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+    deleted_at DATETIME NULL,
+    deleted_by VARCHAR(64) DEFAULT '',
+    UNIQUE KEY uniq_model_name (model_name),
+    INDEX idx_models_is_deleted (is_deleted)
 );
 
 CREATE TABLE IF NOT EXISTS videos (
@@ -48,8 +54,12 @@ CREATE TABLE IF NOT EXISTS videos (
     height INT NOT NULL DEFAULT 0,
     fps DOUBLE NOT NULL DEFAULT 0,
     uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+    deleted_at DATETIME NULL,
+    deleted_by VARCHAR(64) DEFAULT '',
     UNIQUE KEY uniq_videos_stored_filename (stored_filename),
     UNIQUE KEY uniq_videos_stored_path (stored_path),
+    INDEX idx_videos_is_deleted (is_deleted),
     INDEX idx_videos_submitted_by (submitted_by),
     INDEX idx_videos_uploaded_at (uploaded_at)
 );
@@ -83,11 +93,18 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at DATETIME NULL,
     finished_at DATETIME NULL,
+    is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+    deleted_at DATETIME NULL,
+    deleted_by VARCHAR(64) DEFAULT '',
+    cancel_requested TINYINT(1) NOT NULL DEFAULT 0,
+    cancelled_at DATETIME NULL,
     INDEX idx_tasks_status (status),
     INDEX idx_tasks_type (task_type),
     INDEX idx_tasks_user (submitted_by),
     INDEX idx_tasks_created_at (created_at),
     INDEX idx_tasks_input_video_id (input_video_id),
+    INDEX idx_tasks_is_deleted (is_deleted),
+    INDEX idx_tasks_cancel_requested (cancel_requested),
     CONSTRAINT fk_tasks_input_video_id FOREIGN KEY (input_video_id) REFERENCES videos(id),
     CONSTRAINT fk_tasks_model_id FOREIGN KEY (model_id) REFERENCES models(id)
 );

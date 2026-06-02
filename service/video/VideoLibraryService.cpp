@@ -64,3 +64,23 @@ bool VideoLibraryService::resolveVideoPathById(int video_id, std::string &out_pa
     out_path = video.stored_path;
     return true;
 }
+
+int VideoLibraryService::countTasksByVideoId(int video_id)
+{
+    return VideoDao::countTasksByVideoId(video_id);
+}
+
+int VideoLibraryService::countActiveTasksByVideoId(int video_id)
+{
+    return VideoDao::countActiveTasksByVideoId(video_id);
+}
+
+bool VideoLibraryService::softDeleteVideoRecord(int video_id, const std::string &deleted_by)
+{
+    if (video_id <= 0 || deleted_by.empty())
+    {
+        return false;
+    }
+
+    return VideoDao::softDeleteVideo(video_id, deleted_by);
+}

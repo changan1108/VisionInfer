@@ -6,6 +6,21 @@
 
 namespace
 {
+std::string escapeSql(const std::string &input)
+{
+    std::string escaped;
+    escaped.reserve(input.size() * 2);
+    for (std::size_t i = 0; i < input.size(); ++i)
+    {
+        if (input[i] == '\\' || input[i] == '\'')
+        {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(input[i]);
+    }
+    return escaped;
+}
+
 ModelEntity buildModelEntityFromRow(MYSQL_ROW row)
 {
     ModelEntity model;
@@ -42,7 +57,7 @@ bool ModelDao::getModelById(int model_id, ModelEntity &out_model)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    std::string sql = "SELECT id, model_name, file_path, framework, is_active, uploaded_by, uploaded_at, updated_at FROM models WHERE id = " +
+    std::string sql = "SELECT id, model_name, file_path, framework, is_active, uploaded_by, uploaded_at, updated_at FROM models WHERE is_deleted = 0 AND id = " +
                       std::to_string(model_id) + ";";
 
     MYSQL_RES *res = db->query(sql);
@@ -68,7 +83,7 @@ bool ModelDao::getCurrentActiveModel(ModelEntity &out_model)
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, model_name, file_path, framework, is_active, uploaded_by, uploaded_at, updated_at "
-                      "FROM models WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1;";
+                      "FROM models WHERE is_deleted = 0 AND is_active = 1 ORDER BY updated_at DESC LIMIT 1;";
 
     MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
@@ -95,7 +110,7 @@ std::vector<ModelEntity> ModelDao::getAllModels()
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     std::string sql = "SELECT id, model_name, file_path, framework, is_active, uploaded_by, uploaded_at, updated_at "
-                      "FROM models ORDER BY id DESC;";
+                      "FROM models WHERE is_deleted = 0 ORDER BY id DESC;";
 
     MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
@@ -124,7 +139,17 @@ bool ModelDao::activateModel(int model_id)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    std::string sql = "UPDATE models SET is_active = 1 WHERE id = " + std::to_string(model_id) + ";";
+    std::string sql = "UPDATE models SET is_active = 1 WHERE is_deleted = 0 AND id = " + std::to_string(model_id) + ";";
+    return db->update(sql);
+}
+
+bool ModelDao::softDeleteModel(int model_id, const std::string &deleted_by)
+{
+    MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
+
+    std::string sql = "UPDATE models SET is_deleted = 1, deleted_at = NOW(), deleted_by = '" +
+                      escapeSql(deleted_by) + "' WHERE is_deleted = 0 AND id = " +
+                      std::to_string(model_id) + ";";
     return db->update(sql);
 }
 
@@ -134,7 +159,7 @@ ModelStats ModelDao::getModelStats()
 
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
-    MYSQL_RES *overview_res = db->query("SELECT COUNT(*), SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) FROM models;");
+    MYSQL_RES *overview_res = db->query("SELECT COUNT(*), SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) FROM models WHERE is_deleted = 0;");
     if (overview_res != nullptr)
     {
         MYSQL_ROW row = mysql_fetch_row(overview_res);
@@ -146,7 +171,7 @@ ModelStats ModelDao::getModelStats()
         mysql_free_result(overview_res);
     }
 
-    MYSQL_RES *framework_res = db->query("SELECT framework, COUNT(*) FROM models GROUP BY framework;");
+    MYSQL_RES *framework_res = db->query("SELECT framework, COUNT(*) FROM models WHERE is_deleted = 0 GROUP BY framework;");
     if (framework_res != nullptr)
     {
         MYSQL_ROW row = nullptr;

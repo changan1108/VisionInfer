@@ -24,6 +24,9 @@ public:
     static std::vector<TaskEntity> listTasks(const TaskListFilter &filter);
     static TaskStats getTaskStats();
     static TaskExecutionPoolSnapshot getExecutionPoolSnapshot();
+    static bool softDeleteTaskRecord(long long task_id, const std::string &deleted_by);
+    static bool markTaskCancelled(long long task_id);
+    static bool requestTaskCancellation(long long task_id);
 
 private:
     static void dispatchAsyncTask(const TaskEntity &task);

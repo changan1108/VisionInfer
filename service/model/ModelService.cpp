@@ -76,3 +76,13 @@ ModelStats ModelService::getModelStats()
 {
     return ModelDao::getModelStats();
 }
+
+bool ModelService::softDeleteModelRecord(int model_id, const std::string &deleted_by)
+{
+    if (model_id <= 0 || deleted_by.empty())
+    {
+        return false;
+    }
+
+    return ModelDao::softDeleteModel(model_id, deleted_by);
+}

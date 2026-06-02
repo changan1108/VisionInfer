@@ -13,6 +13,8 @@ public:
     static bool getVideoByStoredPath(const std::string &stored_path, VideoEntity &out_video);
     static std::vector<VideoEntity> listVideos(const VideoListFilter &filter);
     static int countTasksByVideoId(int video_id);
+    static int countActiveTasksByVideoId(int video_id);
+    static bool softDeleteVideo(int video_id, const std::string &deleted_by);
 };
 
 #endif // VIDEO_DAO_H
