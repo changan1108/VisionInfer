@@ -174,6 +174,7 @@ bool copyFileBinary(const std::string &source_path, const std::string &target_pa
     return output.good();
 }
 
+// 视频解码抽帧+单帧推理+视频编码写入mp4
 bool extractFrames(const std::string &path,
                    int frame_interval,
                    long long task_id,
@@ -242,17 +243,19 @@ bool extractFrames(const std::string &path,
         }
     };
 
+    // 打开输入视频文件
     if (avformat_open_input(&format_context, path.c_str(), nullptr, nullptr) < 0)
     {
         return false;
     }
-
+    // 读取视频文件
     if (avformat_find_stream_info(format_context, nullptr) < 0)
     {
         cleanup();
         return false;
     }
 
+    // 找到视频流
     int video_stream_index = av_find_best_stream(format_context, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (video_stream_index < 0)
     {
@@ -260,6 +263,7 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
+    // 查找并打开解码器
     AVStream *video_stream = format_context->streams[video_stream_index];
     const AVCodec *decoder = avcodec_find_decoder(video_stream->codecpar->codec_id);
     if (decoder == nullptr)
@@ -482,10 +486,12 @@ bool extractFrames(const std::string &path,
         encode_error_message = "任务已被用户取消";
     };
 
+    // 定义一个lambda函数对象
     auto writeEncodedPackets = [&]() -> bool
     {
         while (true)
         {
+            // 获取编码后的压缩数据包
             int encode_result = avcodec_receive_packet(encoder_context, encode_packet);
             if (encode_result == AVERROR(EAGAIN) || encode_result == AVERROR_EOF)
             {
@@ -499,6 +505,8 @@ bool extractFrames(const std::string &path,
 
             av_packet_rescale_ts(encode_packet, encoder_context->time_base, output_stream->time_base);
             encode_packet->stream_index = output_stream->index;
+
+            // 写入输出 MP4
             if (av_interleaved_write_frame(output_format_context, encode_packet) < 0)
             {
                 av_packet_unref(encode_packet);
@@ -509,6 +517,7 @@ bool extractFrames(const std::string &path,
         }
     };
 
+    // 定义一个lambda函数对象
     auto flush_decoder = [&](bool draining) -> bool
     {
         while (true)
@@ -520,6 +529,7 @@ bool extractFrames(const std::string &path,
             }
 
             auto receive_started_at = std::chrono::steady_clock::now();
+            // 从解码器接收原始帧
             int receive_result = avcodec_receive_frame(codec_context, decoded_frame);
             auto receive_finished_at = std::chrono::steady_clock::now();
             result.decode_receive_duration_ms += static_cast<std::uint64_t>(
@@ -542,6 +552,7 @@ bool extractFrames(const std::string &path,
                 }
 
                 auto render_scale_started_at = std::chrono::steady_clock::now();
+                // 调用FFmpeg库函数：将解码帧转换为原始 RGB 格式(用于在原始尺寸上画框)
                 sws_scale(sws_context,
                           decoded_frame->data,
                           decoded_frame->linesize,
@@ -554,6 +565,8 @@ bool extractFrames(const std::string &path,
                     std::chrono::duration_cast<std::chrono::milliseconds>(render_scale_finished_at - render_scale_started_at).count());
 
                 auto inference_scale_started_at = std::chrono::steady_clock::now();
+                
+                // 转换并缩放为模型输入尺寸(用于模型推理)
                 sws_scale(inference_sws_context,
                           decoded_frame->data,
                           decoded_frame->linesize,
@@ -584,6 +597,8 @@ bool extractFrames(const std::string &path,
                 }
 
                 InferenceResult inference_result;
+
+                // YOLO/ONNX 单帧处理
                 if (!YoloInference::processFrame(render_frame_buffer,
                                                 inference_frame_buffer,
                                                 model_context,
@@ -614,6 +629,7 @@ bool extractFrames(const std::string &path,
                 }
 
                 auto encode_started_at = std::chrono::steady_clock::now();
+                // 完成推理和画框后，要把 RGB 图像转回编码器需要的 YUV420P
                 sws_scale(encode_sws_context,
                           rgb_frame->data,
                           rgb_frame->linesize,
@@ -623,6 +639,7 @@ bool extractFrames(const std::string &path,
                           encode_frame->linesize);
                 encode_frame->pts = extracted_index;
 
+                // 把处理后的帧送入编码器
                 if (avcodec_send_frame(encoder_context, encode_frame) < 0)
                 {
                     encode_error_message = "发送处理后帧到编码器失败";
@@ -646,6 +663,7 @@ bool extractFrames(const std::string &path,
         }
     };
 
+    // 读取压缩数据包(得到压缩包)
     while (av_read_frame(format_context, packet) >= 0)
     {
         if (shouldCancelTask(is_cancel_requested))
@@ -658,6 +676,7 @@ bool extractFrames(const std::string &path,
 
         if (packet->stream_index == video_stream_index)
         {
+            // 向解码器发送压缩包(将压缩包送入解码器)
             if (avcodec_send_packet(codec_context, packet) < 0)
             {
                 av_packet_unref(packet);
@@ -715,6 +734,8 @@ bool extractFrames(const std::string &path,
 }
 }
 
+
+
 bool VideoProcessor::hasSufficientDiskSpaceForTask(const TaskEntity &task, std::string &error_message)
 {
     std::uint64_t available_bytes = getAvailableDiskBytes(AppConfig::PROJECT_ROOT);
@@ -734,41 +755,50 @@ bool VideoProcessor::hasSufficientDiskSpaceForTask(const TaskEntity &task, std::
     return false;
 }
 
+// 简化重载版，内部测试使用，项目最终实际不使用
 bool VideoProcessor::processTask(const TaskEntity &task, TaskEntity &out_result)
 {
     return VideoProcessor::processTask(task, out_result, std::function<bool()>());
 }
 
+// 第二级线程池线程执行的lambda内的：“任务真正的视频处理函数”(参数一:任务参数实体；参数二:输出处理结果参数；参数三:取消检查函数)
 bool VideoProcessor::processTask(const TaskEntity &task,
                                  TaskEntity &out_result,
                                  const std::function<bool()> &is_cancel_requested)
 {
     auto task_started_at = std::chrono::steady_clock::now();
+    // out_result会先复制原任务的字段，然后处理过程中不断补充其他字段
     out_result = task;
 
+    // “任务取消”的检查点
     if (shouldCancelTask(is_cancel_requested))
     {
         markTaskFailure(out_result, TaskStatus::CANCELLED, "任务已被用户取消");
         return false;
     }
 
+    // 检查"输入视频的路径"是否有效
     if (!pathExists(task.input_video_path))
     {
         markTaskFailure(out_result, TaskStatus::FAILED_INPUT_NOT_FOUND, "输入视频文件不存在");
         return false;
     }
 
+    // 创建"输出目录"
     if (!createDirectoryIfNeeded(AppConfig::VIDEO_OUTPUT_DIR))
     {
         markTaskFailure(out_result, TaskStatus::FAILED_OUTPUT_DIR, "创建结果视频输出目录失败");
         return false;
     }
 
+    // 生成"输出路径"(其中，主要是生成结果视频的文件名:原文件名_task_任务ID_result.mp4)
     out_result.output_video_path = buildOutputPath(task.input_video_path, task.id);
 
+    // 创建视频文件元数据对象
     VideoFileMetadata metadata;
     auto metadata_started_at = std::chrono::steady_clock::now();
-    // 这里已经真正调用 FFmpeg 读取视频基础信息，后续抽帧和推理都会建立在这一步之上。
+
+    // 真正调用FFmpeg读取当前视频元数据，后续抽帧和推理都会建立在这一步之上(这里只读取基础信息，还没有逐帧解码)
     if (!VideoMetadataHelper::readMetadata(task.input_video_path, metadata))
     {
         markTaskFailure(out_result, TaskStatus::FAILED_METADATA, "读取输入视频元数据失败");
@@ -776,6 +806,7 @@ bool VideoProcessor::processTask(const TaskEntity &task,
     }
     auto metadata_finished_at = std::chrono::steady_clock::now();
 
+    // 再次一个"任务取消"检查点
     if (shouldCancelTask(is_cancel_requested))
     {
         out_result.video_duration = metadata.duration_seconds;
@@ -786,8 +817,11 @@ bool VideoProcessor::processTask(const TaskEntity &task,
         return false;
     }
 
+    // 模型推理上下文结构体
     InferenceModelContext model_context;
     std::string model_error_message;
+
+    // 构建推理模型上下文
     if (!YoloInference::buildModelContext(task.model_id, model_context, model_error_message))
     {
         markTaskFailure(out_result, TaskStatus::FAILED_INFERENCE, model_error_message.empty() ? "加载推理模型上下文失败" : model_error_message);
@@ -795,6 +829,7 @@ bool VideoProcessor::processTask(const TaskEntity &task,
     }
     model_context.confidence_threshold = static_cast<float>(task.confidence_threshold);
 
+    // "任务取消"检查点
     if (shouldCancelTask(is_cancel_requested))
     {
         out_result.video_duration = metadata.duration_seconds;
@@ -810,6 +845,10 @@ bool VideoProcessor::processTask(const TaskEntity &task,
     FrameExtractionResult extraction_result;
     std::string encode_error_message;
     auto extraction_started_at = std::chrono::steady_clock::now();
+    
+    // extractFrames:视频解码抽帧 + 单帧推理/画框 + 重新编码写入 MP4。
+    // extraction_result 用于带回帧数、检测数、模型信息和各阶段耗时；
+    // encode_error_message 专门带回编码/写文件阶段的详细失败原因。
     if (!extractFrames(task.input_video_path,
                        task.frame_interval,
                        task.id,
@@ -820,6 +859,9 @@ bool VideoProcessor::processTask(const TaskEntity &task,
                        extraction_result,
                        is_cancel_requested))
     {
+        // extractFrames 返回 false 有三类主要原因：用户取消、编码失败、其他抽帧/推理失败。
+        // 第一类：处理过程中收到取消请求。删除可能存在的半成品结果视频，
+        // 并保留取消发生前已经完成的帧数、检测数和模型运行信息。
         if (extraction_result.cancelled)
         {
             std::remove(out_result.output_video_path.c_str());
@@ -845,10 +887,12 @@ bool VideoProcessor::processTask(const TaskEntity &task,
             return false;
         }
 
+        // 第二类：encode_error_message 非空，说明失败点在结果视频编码或写文件阶段。
         if (!encode_error_message.empty())
         {
             markTaskFailure(out_result, TaskStatus::FAILED_ENCODE, encode_error_message);
         }
+        // 第三类：没有明确编码错误，统一归类为抽帧/推理失败。
         else
         {
             markTaskFailure(out_result, TaskStatus::FAILED_INFERENCE, "视频抽帧推理失败");
@@ -857,12 +901,28 @@ bool VideoProcessor::processTask(const TaskEntity &task,
     }
     auto extraction_finished_at = std::chrono::steady_clock::now();
 
-    bool built_from_frames = extraction_result.extracted_frame_count > 0 && pathExists(out_result.output_video_path);
+    // 同时满足“至少处理了一帧”和“输出文件确实存在”，才认为结果视频由"处理后帧"成功编码得到。
+
+    // extracted_frame_count > 0：至少一帧完成了抽帧、推理/画框和编码；
+    // pathExists(...)：编码器确实在磁盘上生成了输出文件。
+    // 其他失败情况下，会删除已经生成的半成品视频、清空输出路径
+    bool built_from_frames = extraction_result.extracted_frame_count > 0 && pathExists(out_result.output_video_path); //标记是否成功完成
+
+    // 保存 extractFrames 带回的编码提示或错误信息，后面写入任务结果摘要。
     std::string build_video_error = encode_error_message;
+
+    // 记录“确认结果视频或执行回退复制”阶段的开始时间，用于统计该阶段耗时。
     auto video_build_started_at = std::chrono::steady_clock::now();
+
+    // 标记是否真正生成了基于处理后帧的结果视频，而不只是存在一个可返回的视频文件。
     extraction_result.result_video_generated = built_from_frames;
+
+    // ffmpeg_stream_encode：处理后帧由 FFmpeg 流式编码生成结果视频；
+    // copy_fallback：没有生成处理后视频，后续复制原视频作为降级结果。
     extraction_result.video_build_mode = built_from_frames ? "ffmpeg_stream_encode" : "copy_fallback";
 
+    // 没有成功生成处理后视频时，用复制原视频作为降级结果，保证结果接口仍有文件可返回。
+    // 此时任务可以完成，但 result_video_generated=false，video_build_mode=copy_fallback，
     if (!built_from_frames)
     {
         if (!copyFileBinary(task.input_video_path, out_result.output_video_path))
@@ -873,6 +933,7 @@ bool VideoProcessor::processTask(const TaskEntity &task,
     }
     auto video_build_finished_at = std::chrono::steady_clock::now();
 
+    // 汇总输出文件大小和各阶段耗时等参数，用于任务详情、性能分析。
     long long output_size = getFileSize(out_result.output_video_path);
     std::uint64_t metadata_duration_ms = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(metadata_finished_at - metadata_started_at).count());
@@ -882,6 +943,8 @@ bool VideoProcessor::processTask(const TaskEntity &task,
         std::chrono::duration_cast<std::chrono::milliseconds>(video_build_finished_at - video_build_started_at).count());
     std::uint64_t total_duration_ms = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(video_build_finished_at - task_started_at).count());
+    // 把 VideoProcessor 产生的结果写入 out_result。
+    // 这里只更新内存对象，数据库更新由上层 TaskService 调用 TaskDao::markTaskCompleted 完成。
     out_result.video_duration = metadata.duration_seconds;
     out_result.video_width = metadata.width;
     out_result.video_height = metadata.height;
@@ -895,6 +958,7 @@ bool VideoProcessor::processTask(const TaskEntity &task,
     out_result.video_build_mode = built_from_frames ? "ffmpeg_stream_encode" : "copy_fallback";
     out_result.inference_runtime_message = extraction_result.inference_runtime_message;
 
+    // 生成成功后的处理结果摘要
     std::ostringstream oss;
     oss << (built_from_frames ? "处理完成，已基于处理后帧流式编码结果视频；类型=" :
                                 "处理完成，但结果视频暂时回退为原视频复制；类型=")
@@ -928,7 +992,10 @@ bool VideoProcessor::processTask(const TaskEntity &task,
         << "，总耗时=" << total_duration_ms
         << "，结果文件大小=" << output_size << " 字节";
 
+    // 写入摘要字段
     out_result.result_summary = oss.str();
+
+    // 将内存结果标记为 COMPLETED 并清空错误信息
     out_result.status = TaskStatus::COMPLETED;
     out_result.error_message.clear();
     return true;
@@ -936,9 +1003,11 @@ bool VideoProcessor::processTask(const TaskEntity &task,
 
 std::string VideoProcessor::inferFailureStatus(const TaskEntity &task_result)
 {
+    // VideoProcessor 已经判断出具体失败阶段时，保留其 FAILED_* 或 CANCELLED 状态。
     if (!task_result.status.empty())
     {
         return task_result.status;
     }
+    // 若底层没有给出具体状态，则由上层统一按未知运行时失败处理。
     return TaskStatus::FAILED_RUNTIME;
 }

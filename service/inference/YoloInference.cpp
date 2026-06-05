@@ -779,11 +779,13 @@ void drawDetectionBox(FrameBuffer &frame, const DetectionBox &box)
 }
 }
 
+// 构建推理模型上下文
 bool YoloInference::buildModelContext(int task_model_id, InferenceModelContext &context, std::string &error_message)
 {
     ModelEntity model;
     bool found_model = false;
 
+    // 如果任务指定了model_id，查询指定模型
     if (task_model_id > 0)
     {
         found_model = ModelService::getModelById(task_model_id, model);
@@ -794,12 +796,13 @@ bool YoloInference::buildModelContext(int task_model_id, InferenceModelContext &
         }
         context.uses_active_model = false;
     }
-    else
+    else //否则查询当前激活模型
     {
         found_model = ModelService::getCurrentActiveModel(model);
         context.uses_active_model = true;
     }
 
+    // 测试使用
     if (!found_model)
     {
         // 当前阶段允许没有真实模型时继续跑占位推理，这样不会阻塞主链路联调。
@@ -814,6 +817,7 @@ bool YoloInference::buildModelContext(int task_model_id, InferenceModelContext &
         return true;
     }
 
+    // 获取模型名称、路径和框架
     context.model_id = model.id;
     context.model_name = model.model_name;
     context.model_path = model.file_path;
@@ -826,38 +830,52 @@ bool YoloInference::buildModelContext(int task_model_id, InferenceModelContext &
     context.metadata["source"] = context.uses_active_model ? "active_model" : "task_model";
     context.metadata["uploaded_by"] = model.uploaded_by;
 
+    // ONNX 模型且文件存在。
+    // 尝试从缓存中复用 Session；若缓存没有，则创建并缓存新的 ONNX Runtime Session。
     if (context.framework == "onnx" && context.file_exists)
     {
         context.load_attempted = true;
         std::shared_ptr<CachedOnnxSession> cached_session;
         context.load_success = getOrCreateOnnxSession(context.model_path, cached_session, context.load_message);
+        // Session 加载成功时使用真实 ONNX 推理；失败时退回占位推理。
         context.placeholder_mode = !context.load_success;
     }
+    // 框架声明为 ONNX，但模型文件不存在。
+    // 此时无法创建 Session，只记录失败原因并保留占位推理模式。
     else if (context.framework == "onnx")
     {
         context.load_attempted = true;
         context.load_success = false;
         context.load_message = "模型文件不存在，暂时回退到占位推理";
     }
+    // 不是ONNX模型,当前实现不加载其他框架，直接使用占位推理。
+    // 注意此时不进行ONNX检查/驳回，因为这个业务属于"ModelUploadService::uploadModel"接口
     else
     {
         context.load_message = "当前仅对 onnx 框架做加载探测，其余框架暂时回退到占位推理";
     }
 
+    // 将加载结果保存到 metadata，供任务结果摘要和系统状态展示使用。
     context.metadata["load_attempted"] = context.load_attempted ? "true" : "false";
     context.metadata["load_success"] = context.load_success ? "true" : "false";
+
+    // Session 加载成功后，在这里读取模型元信息，并不执行前向推理。
+    // 真正的 ONNX 前向推理发生在 processFrame() -> runOnnxForward() 中。
     if (context.load_success)
     {
         std::shared_ptr<CachedOnnxSession> cached_session;
         std::string ignored_message;
+        // 再次调用会命中缓存，用于取得已加载 Session 的输入输出描述。
         if (getOrCreateOnnxSession(context.model_path, cached_session, ignored_message))
         {
+            // 常见模型输入形状为 NCHW：[批大小, 通道数, 高度, 宽度]。
             if (cached_session->input_shape.size() == 4)
             {
                 context.input_channels = static_cast<int>(cached_session->input_shape[1] > 0 ? cached_session->input_shape[1] : 3);
                 context.input_height = static_cast<int>(cached_session->input_shape[2] > 0 ? cached_session->input_shape[2] : 640);
                 context.input_width = static_cast<int>(cached_session->input_shape[3] > 0 ? cached_session->input_shape[3] : 640);
             }
+            // 保存输出张量数量、类别名称和张量形状，供后续预处理及 YOLO 后处理使用。
             context.output_tensor_count = static_cast<int>(cached_session->output_names.size());
             context.class_names = cached_session->class_names;
             context.metadata["input_shape"] = shapeToString(cached_session->input_shape);
@@ -872,11 +890,12 @@ bool YoloInference::buildModelContext(int task_model_id, InferenceModelContext &
         }
     }
 
-    // 即使模型加载失败，也先不阻断整个视频任务，方便继续联调整体链路。
+
     error_message.clear();
     return true;
 }
 
+// YOLO/ONNX 单帧处理
 bool YoloInference::processFrame(FrameBuffer &render_frame,
                                  const FrameBuffer &inference_frame,
                                  const InferenceModelContext &context,
@@ -897,6 +916,7 @@ bool YoloInference::processFrame(FrameBuffer &render_frame,
     if (context.load_success && context.framework == "onnx")
     {
         auto forward_started_at = std::chrono::steady_clock::now();
+        // runOnnxForward 执行 ONNX 前向推理
         forward_success = runOnnxForward(inference_frame, context, forward_result);
         auto forward_finished_at = std::chrono::steady_clock::now();
         result.forward_duration_ms = static_cast<std::uint64_t>(
@@ -912,6 +932,7 @@ bool YoloInference::processFrame(FrameBuffer &render_frame,
     if (forward_success && !forward_result.output_tensors.empty())
     {
         auto postprocess_started_at = std::chrono::steady_clock::now();
+        // decodeYoloV8Output 后处理
         decode_success = decodeYoloV8Output(forward_result.output_tensors[0], render_frame, context, result);
         auto postprocess_finished_at = std::chrono::steady_clock::now();
         result.postprocess_duration_ms = static_cast<std::uint64_t>(
@@ -923,6 +944,7 @@ bool YoloInference::processFrame(FrameBuffer &render_frame,
         auto draw_started_at = std::chrono::steady_clock::now();
         for (const DetectionBox &box : result.boxes)
         {
+            // 在原尺寸帧上画框
             drawDetectionBox(render_frame, box);
         }
         auto draw_finished_at = std::chrono::steady_clock::now();

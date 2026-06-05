@@ -189,6 +189,7 @@ bool TaskDao::softDeleteTask(long long task_id, const std::string &deleted_by)
     return db->update(sql);
 }
 
+// 更新方法，把任务表中对应任务正式标记为已取消
 bool TaskDao::markTaskCancelled(long long task_id)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
@@ -200,6 +201,8 @@ bool TaskDao::markTaskCancelled(long long task_id)
     return db->update(sql);
 }
 
+// Entity 版本
+// ID 版本用于任务尚未深入处理时的简单取消,Entity版本用于处理中取消,保存已经产生的部分处理数据(用于向前端展示已处理的进度，以及用于系统监控的数据)
 bool TaskDao::markTaskCancelled(const TaskEntity &task)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
@@ -225,6 +228,7 @@ bool TaskDao::markTaskCancelled(const TaskEntity &task)
     return db->update(sql);
 }
 
+// 更新方法，用户刚点击取消，只更新记录“用户请求取消”
 bool TaskDao::markTaskCancelRequested(long long task_id)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
@@ -236,10 +240,12 @@ bool TaskDao::markTaskCancelRequested(long long task_id)
     return db->update(sql);
 }
 
+// 查询用户是否已经请求取消(true-已经请求取消;false-没有请求取消，或者查询失败/记录不存在)
 bool TaskDao::isTaskCancellationRequested(long long task_id)
 {
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
+    // 查询用户是否已经请求取消
     std::string sql = "SELECT cancel_requested FROM tasks WHERE is_deleted = 0 AND id = " +
                       std::to_string(task_id) + " LIMIT 1;";
 

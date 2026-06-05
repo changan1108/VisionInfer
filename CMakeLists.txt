@@ -5,6 +5,9 @@ cmake_minimum_required(VERSION 3.10)
 # 2. 声明项目名称和支持的语言
 project(VisionInferenceServer CXX)
 
+# 方便vscode解读cmake项目
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # 3. 指定 C++ 标准
 # 目前项目原有代码用到的特性在 C++11 就能工作，但接入 ONNX Runtime 1.25.x 后，
 # 其官方 C++ 头文件已经依赖更高标准（至少需要 C++17）。

@@ -172,6 +172,7 @@ bool ModelUploadService::uploadModel(const ModelUploadRequest &request, ModelUpl
         return false;
     }
 
+    // 检查是否是onnx模型
     std::string framework = request.framework.empty() ? "onnx" : toLowerCopy(request.framework);
     if (framework != "onnx")
     {
@@ -182,6 +183,8 @@ bool ModelUploadService::uploadModel(const ModelUploadRequest &request, ModelUpl
     std::string original_filename = sanitizeFilename(request.original_filename.empty() ? "uploaded_model.onnx"
                                                                                        : request.original_filename);
     std::string extension = getFileExtension(original_filename);
+    
+    // 检查扩展名
     if (extension != ".onnx")
     {
         error_message = "当前仅支持 .onnx 模型文件";

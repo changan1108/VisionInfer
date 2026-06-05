@@ -19,7 +19,9 @@ struct TaskExecutionPoolSnapshot
 class TaskService
 {
 public:
+    // 提交任务
     static bool submitTask(TaskEntity &task, std::string &error_message);
+
     static bool getTaskById(long long task_id, TaskEntity &out_task);
     static std::vector<TaskEntity> listTasks(const TaskListFilter &filter);
     static TaskStats getTaskStats();
@@ -29,7 +31,10 @@ public:
     static bool requestTaskCancellation(long long task_id);
 
 private:
+
+    // 使用第一级线程池调度任务
     static void dispatchAsyncTask(const TaskEntity &task);
+    // 使用第二级线程池处理任务
     static void enqueueVideoProcessingTask(const TaskEntity &task,
                                            std::chrono::steady_clock::time_point queued_at);
 };
