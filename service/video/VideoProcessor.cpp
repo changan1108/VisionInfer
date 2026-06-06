@@ -175,36 +175,56 @@ bool copyFileBinary(const std::string &source_path, const std::string &target_pa
 }
 
 // 视频解码抽帧+单帧推理+视频编码写入mp4
-bool extractFrames(const std::string &path,
-                   int frame_interval,
-                   long long task_id,
-                   double output_fps,
-                   const std::string &output_path,
-                   const InferenceModelContext &model_context,
-                   std::string &encode_error_message,
-                   FrameExtractionResult &result,
-                   const std::function<bool()> &is_cancel_requested)
+bool extractFrames(const std::string &path,// 输入视频路径
+                   int frame_interval,// 抽帧间隔
+                   long long task_id,// 任务编号
+                   double output_fps,// 结果视频帧率
+                   const std::string &output_path,// 结果视频路径
+                   const InferenceModelContext &model_context,// 推理模型配置(上下文)
+                   std::string &encode_error_message,// 返回编码错误信息
+                   FrameExtractionResult &result,// 返回帧数、检测数和耗时
+                   const std::function<bool()> &is_cancel_requested)// 随时检查任务取消
 {
     if (frame_interval <= 0 || output_path.empty())
     {
         return false;
     }
 
-    AVFormatContext *format_context = nullptr;
-    AVCodecContext *codec_context = nullptr;
-    SwsContext *sws_context = nullptr;
-    SwsContext *inference_sws_context = nullptr;
-    AVFrame *decoded_frame = nullptr;
-    AVFrame *rgb_frame = nullptr;
-    AVFrame *inference_rgb_frame = nullptr;
-    AVPacket *packet = nullptr;
-    AVFormatContext *output_format_context = nullptr;
-    AVCodecContext *encoder_context = nullptr;
-    SwsContext *encode_sws_context = nullptr;
-    AVFrame *encode_frame = nullptr;
-    AVPacket *encode_packet = nullptr;
-    AVStream *output_stream = nullptr;
+    // 输入端
+    AVFormatContext *format_context = nullptr;// 表示整个输入媒体容器，例如整个 MP4 文件
+    AVCodecContext *codec_context = nullptr;// 解码器上下文
+    SwsContext *sws_context = nullptr;// 解码帧 -> 原尺寸 RGB
+    SwsContext *inference_sws_context = nullptr;// 解码帧 -> 模型尺寸 RGB
+    // 图片帧
+    AVFrame *decoded_frame = nullptr;// 解码器输出的原始帧
+    AVFrame *rgb_frame = nullptr;// 原视频尺寸RGB，负责画框和输出
+    AVFrame *inference_rgb_frame = nullptr;// 模型输入尺寸RGB，负责推理
 
+    AVPacket *packet = nullptr;// 从输入文件读取的压缩包
+
+    // 输出端
+    AVFormatContext *output_format_context = nullptr;// 表示将要生成的结果MP4容器
+    AVCodecContext *encoder_context = nullptr;// 编码器上下文
+    SwsContext *encode_sws_context = nullptr; // RGB -> YUV420P
+    // 图片帧(经过层层处理后的可以用于编码器的帧)
+    AVFrame *encode_frame = nullptr;// YUV420P，送给H.264编码器
+    AVPacket *encode_packet = nullptr;// 保存 H.264 编码器生成的压缩数据，随后写入 MP4
+    AVStream *output_stream = nullptr; // 表示媒体文件中的一条轨道,即一个MP4有视频流、音频流、字幕流，本次主要抓视频流(输出端，输入端的定义在下面)
+
+    /*数据变化
+    视频流的Packet数据（一个视频容器中H.264格式的压缩数据，常规视频中每帧都会压缩，不然视频文件会很大）
+    -> decoded_frame（解码后的原始帧：原尺寸 YUV）
+    -> rgb_frame（原始帧：原尺寸 YUV -> 原尺寸 RGB）
+    -> inference_rgb_frame（原始帧：原尺寸 YUV -> 模型要求的输入尺寸：640×640 RGB）
+    -> encode_frame（由画框后的画框后原尺寸 RGB -> 原尺寸 YUV420P）
+    -> encode_packet（重新压缩的H.264格式的压缩包）
+    
+    FFmpeg核心思想是
+    解码：Packet -> Frame
+    编码：Frame -> Packet
+    */
+
+    // 定义一个lambda函数对象：cleanup，用于资源回收
     auto cleanup = [&]()
     {
         av_packet_free(&encode_packet);
@@ -243,12 +263,13 @@ bool extractFrames(const std::string &path,
         }
     };
 
+    /* 初始化解码器-start */
     // 打开输入视频文件
     if (avformat_open_input(&format_context, path.c_str(), nullptr, nullptr) < 0)
     {
         return false;
     }
-    // 读取视频文件
+    // 读取各种流数据
     if (avformat_find_stream_info(format_context, nullptr) < 0)
     {
         cleanup();
@@ -263,15 +284,16 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
-    // 查找并打开解码器
+    // 查找与视频编码格式匹配的解码器并打开解码器(如视频是H.264，就寻找H.264解码器；也可以是其他格式，只要是FFmpeg库支持的就行)
     AVStream *video_stream = format_context->streams[video_stream_index];
-    const AVCodec *decoder = avcodec_find_decoder(video_stream->codecpar->codec_id);
+    const AVCodec *decoder = avcodec_find_decoder(video_stream->codecpar->codec_id);// AVCodec：解码器类型
     if (decoder == nullptr)
     {
         cleanup();
         return false;
     }
 
+    // 创建解码上下文
     codec_context = avcodec_alloc_context3(decoder);
     if (codec_context == nullptr)
     {
@@ -279,18 +301,23 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
+    // 将视频流参数复制给解码器
     if (avcodec_parameters_to_context(codec_context, video_stream->codecpar) < 0)
     {
         cleanup();
         return false;
     }
 
+    // 打开解码器
     if (avcodec_open2(codec_context, decoder, nullptr) < 0)
     {
         cleanup();
         return false;
     }
+    /* 初始化解码器-end */
 
+    /* 转换原始帧-start */
+    // 原尺寸RGB转换(原尺寸 YUV -> 原尺寸 RGB，用于：将检测框画在原分辨率视频上+最后生成结果视频)
     sws_context = sws_getContext(codec_context->width,
                                  codec_context->height,
                                  codec_context->pix_fmt,
@@ -307,6 +334,7 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
+    // 模型输入要求的尺寸RGB(原尺寸 YUV -> 640×640 RGB，用于：模型推理)
     inference_sws_context = sws_getContext(codec_context->width,
                                            codec_context->height,
                                            codec_context->pix_fmt,
@@ -322,10 +350,12 @@ bool extractFrames(const std::string &path,
         cleanup();
         return false;
     }
-
-    decoded_frame = av_frame_alloc();
+    
+    // 创建decoded/RGB/inference Frame并分配内存
+    decoded_frame = av_frame_alloc(); 
     rgb_frame = av_frame_alloc();
     inference_rgb_frame = av_frame_alloc();
+    // 创建packet并分配内存
     packet = av_packet_alloc();
     if (decoded_frame == nullptr || rgb_frame == nullptr || inference_rgb_frame == nullptr || packet == nullptr)
     {
@@ -364,7 +394,11 @@ bool extractFrames(const std::string &path,
         target_fps_q.num = 25;
         target_fps_q.den = 1;
     }
+    /* 转换原始帧-end */
 
+
+    /* 输出编码器初始化-start */
+    // 创建输出MP4上下文
     avformat_alloc_output_context2(&output_format_context, nullptr, nullptr, output_path.c_str());
     if (output_format_context == nullptr)
     {
@@ -373,6 +407,7 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
+    // 寻找H.264编码器
     const AVCodec *encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
     if (encoder == nullptr)
     {
@@ -381,7 +416,9 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
+    // 创建输出视频流
     output_stream = avformat_new_stream(output_format_context, nullptr);
+    // 创建编码上下文
     encoder_context = output_stream == nullptr ? nullptr : avcodec_alloc_context3(encoder);
     if (output_stream == nullptr || encoder_context == nullptr)
     {
@@ -390,6 +427,7 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
+    // 配置编码参数
     encoder_context->codec_id = encoder->id;
     encoder_context->codec_type = AVMEDIA_TYPE_VIDEO;
     encoder_context->pix_fmt = AV_PIX_FMT_YUV420P;
@@ -409,6 +447,8 @@ bool extractFrames(const std::string &path,
     {
         av_opt_set(encoder_context->priv_data, "preset", "veryfast", 0);
     }
+
+    // 配置并打开H.264编码器
     if (avcodec_open2(encoder_context, encoder, nullptr) < 0)
     {
         encode_error_message = "打开输出视频编码器失败";
@@ -426,6 +466,7 @@ bool extractFrames(const std::string &path,
 
     if ((output_format_context->oformat->flags & AVFMT_NOFILE) == 0)
     {
+        // 打开输出文件
         if (avio_open(&output_format_context->pb, output_path.c_str(), AVIO_FLAG_WRITE) < 0)
         {
             encode_error_message = "打开结果视频文件失败";
@@ -434,6 +475,7 @@ bool extractFrames(const std::string &path,
         }
     }
 
+    // 写入MP4文件头
     if (avformat_write_header(output_format_context, nullptr) < 0)
     {
         encode_error_message = "写入结果视频头失败";
@@ -441,6 +483,8 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
+
+    // 创建RGB->YUV420P转换上下文
     encode_sws_context = sws_getContext(codec_context->width,
                                         codec_context->height,
                                         AV_PIX_FMT_RGB24,
@@ -451,6 +495,8 @@ bool extractFrames(const std::string &path,
                                         nullptr,
                                         nullptr,
                                         nullptr);
+    
+    // 创建编码Frame和Packet
     encode_frame = av_frame_alloc();
     encode_packet = av_packet_alloc();
     if (encode_sws_context == nullptr || encode_frame == nullptr || encode_packet == nullptr)
@@ -485,8 +531,11 @@ bool extractFrames(const std::string &path,
         result.total_detection_count = total_detection_count;
         encode_error_message = "任务已被用户取消";
     };
+    /* 输出编码器初始化-end */
 
+    /* 定义辅助lambda-start */
     // 定义一个lambda函数对象
+    // 负责从编码器接收encode_packet->写入输出MP4
     auto writeEncodedPackets = [&]() -> bool
     {
         while (true)
@@ -517,8 +566,11 @@ bool extractFrames(const std::string &path,
         }
     };
 
-    // 定义一个lambda函数对象
-    auto flush_decoder = [&](bool draining) -> bool
+    // 负责从解码器接收 decoded_frame，并依次完成抽帧、格式转换、推理、画框和编码。
+    // 接收并处理解码器当前可输出的全部视频帧。
+    // is_draining=false：正常处理某个输入 Packet 产生的帧；
+    // is_draining=true：输入结束并发送空 Packet 后，接收解码器内部缓存的剩余帧。
+    auto receiveAndProcessDecodedFrames = [&](bool is_draining) -> bool
     {
         while (true)
         {
@@ -529,8 +581,10 @@ bool extractFrames(const std::string &path,
             }
 
             auto receive_started_at = std::chrono::steady_clock::now();
-            // 从解码器接收原始帧
+
+            // 从解码器接收原始帧,接收解码后的 Frame
             int receive_result = avcodec_receive_frame(codec_context, decoded_frame);
+
             auto receive_finished_at = std::chrono::steady_clock::now();
             result.decode_receive_duration_ms += static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(receive_finished_at - receive_started_at).count());
@@ -543,7 +597,8 @@ bool extractFrames(const std::string &path,
                 return false;
             }
 
-            if (decoded_index % frame_interval == 0)
+            // 抽帧策略
+            if (decoded_index % frame_interval == 0) // 取frame_interval的倍数索引
             {
                 if (shouldCancelTask(is_cancel_requested))
                 {
@@ -552,7 +607,7 @@ bool extractFrames(const std::string &path,
                 }
 
                 auto render_scale_started_at = std::chrono::steady_clock::now();
-                // 调用FFmpeg库函数：将解码帧转换为原始 RGB 格式(用于在原始尺寸上画框)
+                // 调用FFmpeg库函数：将解码帧转换为原尺寸但RGB格式(用于在原始尺寸上画框+生成结果视频)
                 sws_scale(sws_context,
                           decoded_frame->data,
                           decoded_frame->linesize,
@@ -578,12 +633,14 @@ bool extractFrames(const std::string &path,
                 result.inference_scale_duration_ms += static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(inference_scale_finished_at - inference_scale_started_at).count());
 
+                // 包装为项目自定义的FrameBuffer(原尺寸+RGB)
                 FrameBuffer render_frame_buffer;
                 render_frame_buffer.width = codec_context->width;
                 render_frame_buffer.height = codec_context->height;
                 render_frame_buffer.linesize = rgb_frame->linesize[0];
                 render_frame_buffer.data = rgb_frame->data[0];
 
+                // 包装为项目自定义的FrameBuffer(模型要求尺寸+RGB)
                 FrameBuffer inference_frame_buffer;
                 inference_frame_buffer.width = model_context.input_width;
                 inference_frame_buffer.height = model_context.input_height;
@@ -598,7 +655,8 @@ bool extractFrames(const std::string &path,
 
                 InferenceResult inference_result;
 
-                // YOLO/ONNX 单帧处理
+                // 进行YOLO/ONNX单帧处理
+                // (其中，inference_frame_buffer：送入ONNX模型；render_frame_buffer：在原尺寸图像上画检测框)
                 if (!YoloInference::processFrame(render_frame_buffer,
                                                 inference_frame_buffer,
                                                 model_context,
@@ -629,7 +687,8 @@ bool extractFrames(const std::string &path,
                 }
 
                 auto encode_started_at = std::chrono::steady_clock::now();
-                // 完成推理和画框后，要把 RGB 图像转回编码器需要的 YUV420P
+
+                // 完成推理和画框后，要把原尺寸+RGB 转为编码器需要的 原尺寸+YUV420P(画框后的rgb_frame不能直接给H.264编码器，因此先转换为YUV420P)
                 sws_scale(encode_sws_context,
                           rgb_frame->data,
                           rgb_frame->linesize,
@@ -637,14 +696,17 @@ bool extractFrames(const std::string &path,
                           codec_context->height,
                           encode_frame->data,
                           encode_frame->linesize);
+                // 设置输出帧时间戳
                 encode_frame->pts = extracted_index;
 
-                // 把处理后的帧送入编码器
+                // 把处理后的帧(encode_frame)送入编码器
                 if (avcodec_send_frame(encoder_context, encode_frame) < 0)
                 {
                     encode_error_message = "发送处理后帧到编码器失败";
                     return false;
                 }
+
+                // 调用 writeEncodedPackets()，内部获取压缩Packet
                 if (!writeEncodedPackets())
                 {
                     return false;
@@ -656,16 +718,21 @@ bool extractFrames(const std::string &path,
             }
 
             ++decoded_index;
-            if (!draining)
+            // 正常解码阶段主动解除当前帧引用；排空阶段由后续 receive/free 统一处理。
+            if (!is_draining)
             {
                 av_frame_unref(decoded_frame);
             }
         }
     };
+    /* 定义辅助lambda-end */
 
-    // 读取压缩数据包(得到压缩包)
+
+    /* 主解码循环-start */
+    // 每次读取一个输入Packet
     while (av_read_frame(format_context, packet) >= 0)
     {
+        // "任务取消"检查点
         if (shouldCancelTask(is_cancel_requested))
         {
             markCancelled();
@@ -674,9 +741,10 @@ bool extractFrames(const std::string &path,
             return false;
         }
 
+        // 只处理视频流
         if (packet->stream_index == video_stream_index)
         {
-            // 向解码器发送压缩包(将压缩包送入解码器)
+            // 将压缩包packet送入解码器
             if (avcodec_send_packet(codec_context, packet) < 0)
             {
                 av_packet_unref(packet);
@@ -684,7 +752,9 @@ bool extractFrames(const std::string &path,
                 return false;
             }
 
-            if (!flush_decoder(false))
+            // 当前 Packet 送入后，接收并处理解码器此时能够输出的全部视频帧。
+            // 由于解码器可能缓存和重排序，这些帧不一定只由当前 Packet 产生，也可能暂时没有帧可取。
+            if (!receiveAndProcessDecodedFrames(false))
             {
                 av_packet_unref(packet);
                 cleanup();
@@ -693,6 +763,8 @@ bool extractFrames(const std::string &path,
         }
         av_packet_unref(packet);
     }
+    /* 主解码循环-end */
+
 
     if (shouldCancelTask(is_cancel_requested))
     {
@@ -701,32 +773,41 @@ bool extractFrames(const std::string &path,
         return false;
     }
 
+    // 向解码器发送 nullptr，排空剩余帧
+    // 通知解码器：输入Packet已经全部发送完，请把内部缓存的剩余Frame全部吐出来
+    // 空 Packet 通知解码器输入已经结束，使其输出内部缓存的延迟帧。
     avcodec_send_packet(codec_context, nullptr);
-    if (!flush_decoder(true))
+    // 接收并处理解码器排空阶段输出的剩余视频帧。
+    if (!receiveAndProcessDecodedFrames(true))
     {
         cleanup();
         return false;
     }
 
+    // 最后额外执行一次avcodec_send_frame(encoder_context, nullptr);+writeEncodedPackets();
+    // 用于对编码器内部缓存的数据全部排空
+    // 空 Frame 通知编码器不再有新帧，使其输出内部缓存的延迟编码包。
     if (avcodec_send_frame(encoder_context, nullptr) < 0)
     {
         encode_error_message = "刷新结果视频编码器失败";
         cleanup();
         return false;
     }
+    // 接收编码器排空阶段输出的剩余 Packet，并全部写入结果 MP4。
     if (!writeEncodedPackets())
     {
         cleanup();
         return false;
     }
 
+    // 写入MP4尾部和索引信息(编码管线完整结束)
     if (av_write_trailer(output_format_context) < 0)
     {
         encode_error_message = "写入结果视频尾部失败";
         cleanup();
         return false;
     }
-
+    // 保存帧数和检测数
     result.extracted_frame_count = extracted_index;
     result.total_detection_count = total_detection_count;
     cleanup();
