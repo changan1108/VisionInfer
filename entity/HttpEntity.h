@@ -9,7 +9,7 @@ struct HttpRequest
 {
     std::string method;                                       // 例如 "GET" 或 "POST"
     std::string path;                                         // 例如 "/api/user/info"
-    std::string body;                                         // 前端发来的请求体内容： JSON 字符串数据(用于POST请求)
+    std::string body;                                         // 前端发来的请求体内容： JSON 字符串数据、表单或文件二进制内容(用于POST请求)
     std::unordered_map<std::string, std::string> headers;     // 请求头
     std::unordered_map<std::string, std::string> queryParams; // 用来存放 URL ? 后面的键值对参数(用于GET请求)
 };

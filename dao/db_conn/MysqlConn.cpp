@@ -17,6 +17,7 @@ MysqlConn::~MysqlConn()
     }
 }
 
+// 连接数据库
 bool MysqlConn::connect(const std::string &user, const std::string &passwd,
                         const std::string &dbName, const std::string &ip,
                         unsigned int port)
@@ -33,6 +34,7 @@ bool MysqlConn::connect(const std::string &user, const std::string &passwd,
     return true;
 }
 
+// 执行更新语句 (Insert, Update, Delete)
 bool MysqlConn::update(const std::string &sql)
 {
     // 执行 SQL 语句。执行成功返回 0
@@ -56,6 +58,7 @@ MYSQL_RES *MysqlConn::query(const std::string &sql)
     return mysql_store_result(conn_);
 }
 
+// 获取刚刚插入的记录的主键
 long long MysqlConn::getLastInsertId() const
 {
     return static_cast<long long>(mysql_insert_id(conn_));

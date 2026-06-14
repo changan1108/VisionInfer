@@ -225,34 +225,44 @@ void EpollServer::closeClient(int client_fd)
     SystemMonitor::instance().decrementConnections();
 }
 
+// 判断请求是否接受完整了
 bool EpollServer::isRequestComplete(const std::string &buffer) const
 {
+    // 看是否已经接收了"空行"
     std::size_t headers_end = buffer.find("\r\n\r\n");
     if (headers_end == std::string::npos)
     {
         return false;
     }
 
+    // 读取Content-Length
     std::size_t content_length = 0;
     std::size_t content_length_pos = buffer.find("Content-Length:");
+
+    // 看实际接受到的请求体字节数，与其请求头中记录的是否一致
     if (content_length_pos != std::string::npos && content_length_pos < headers_end)
     {
+        // 定位到"请求体"开始位置
         std::size_t value_begin = content_length_pos + std::string("Content-Length:").length();
         while (value_begin < headers_end && (buffer[value_begin] == ' ' || buffer[value_begin] == '\t'))
         {
             ++value_begin;
         }
 
+        // 定位到"请求体"结束位置
         std::size_t value_end = buffer.find("\r\n", value_begin);
         if (value_end == std::string::npos || value_end > headers_end)
         {
             return false;
         }
 
+        // 获取子串
         std::string value = buffer.substr(value_begin, value_end - value_begin);
+        // 获取实际长度
         content_length = static_cast<std::size_t>(std::strtoull(value.c_str(), NULL, 10));
     }
 
+    // 比较已收到的body长度(看实际接受到的请求体字节数，与其请求头中记录的是否一致)
     std::size_t body_begin = headers_end + 4;
     std::size_t body_size = buffer.size() - body_begin;
     return body_size >= content_length;

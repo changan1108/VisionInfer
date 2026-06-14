@@ -316,8 +316,8 @@ bool extractFrames(const std::string &path,// 输入视频路径
     }
     /* 初始化解码器-end */
 
-    /* 转换原始帧-start */
-    // 原尺寸RGB转换(原尺寸 YUV -> 原尺寸 RGB，用于：将检测框画在原分辨率视频上+最后生成结果视频)
+    /* 转换原始帧的前期工作准备-start */
+    // 创建转换1(原尺寸RGB)的上下文(原尺寸 YUV -> 原尺寸 RGB，用于：将检测框画在原分辨率视频上+最后生成结果视频)
     sws_context = sws_getContext(codec_context->width,
                                  codec_context->height,
                                  codec_context->pix_fmt,
@@ -334,7 +334,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
         return false;
     }
 
-    // 模型输入要求的尺寸RGB(原尺寸 YUV -> 640×640 RGB，用于：模型推理)
+    // 创建转换2(模型输入要求的尺寸RGB)的上下文(原尺寸 YUV -> 640×640 RGB，用于：模型推理)
     inference_sws_context = sws_getContext(codec_context->width,
                                            codec_context->height,
                                            codec_context->pix_fmt,
@@ -351,11 +351,11 @@ bool extractFrames(const std::string &path,// 输入视频路径
         return false;
     }
     
-    // 创建decoded/RGB/inference Frame并分配内存
+    // 创建decoded/RGB/inference Frame结构体
     decoded_frame = av_frame_alloc(); 
     rgb_frame = av_frame_alloc();
     inference_rgb_frame = av_frame_alloc();
-    // 创建packet并分配内存
+    // 创建packet结构体
     packet = av_packet_alloc();
     if (decoded_frame == nullptr || rgb_frame == nullptr || inference_rgb_frame == nullptr || packet == nullptr)
     {
@@ -363,6 +363,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
         return false;
     }
 
+    // 原尺寸 RGB 图像分配内存(rgb_frame->data接收对应内存区域)
     int rgb_buffer_size = av_image_alloc(rgb_frame->data,
                                          rgb_frame->linesize,
                                          codec_context->width,
@@ -375,6 +376,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
         return false;
     }
 
+    // 模型尺寸 RGB 图像分配内存(inference_rgb_frame->data接收对应内存)
     int inference_rgb_buffer_size = av_image_alloc(inference_rgb_frame->data,
                                                    inference_rgb_frame->linesize,
                                                    model_context.input_width,
@@ -387,6 +389,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
         return false;
     }
 
+    // 把浮点帧率转换成 FFmpeg 使用的有理数
     double target_fps = output_fps > 0.0 ? output_fps : 25.0;
     AVRational target_fps_q = av_d2q(target_fps, 100000);
     if (target_fps_q.num <= 0 || target_fps_q.den <= 0)
@@ -394,7 +397,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
         target_fps_q.num = 25;
         target_fps_q.den = 1;
     }
-    /* 转换原始帧-end */
+    /* 转换原始帧的前期工作准备-end */
 
 
     /* 输出编码器初始化-start */
@@ -496,7 +499,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
                                         nullptr,
                                         nullptr);
     
-    // 创建编码Frame和Packet
+    // 创建"编码Frame"和"编码Packet"结构体(转换到YUV420P后的帧以及对应压缩数据包)
     encode_frame = av_frame_alloc();
     encode_packet = av_packet_alloc();
     if (encode_sws_context == nullptr || encode_frame == nullptr || encode_packet == nullptr)
@@ -509,6 +512,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
     encode_frame->format = encoder_context->pix_fmt;
     encode_frame->width = encoder_context->width;
     encode_frame->height = encoder_context->height;
+    // 为encode_frame分配内存
     if (av_frame_get_buffer(encode_frame, 32) < 0)
     {
         encode_error_message = "分配结果视频编码帧失败";
@@ -516,6 +520,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
         return false;
     }
 
+    // 处理结果变量初始化
     result.inference_model_name = model_context.model_name;
     result.inference_framework = model_context.framework;
     result.inference_model_file_exists = model_context.file_exists;
@@ -568,8 +573,6 @@ bool extractFrames(const std::string &path,// 输入视频路径
 
     // 负责从解码器接收 decoded_frame，并依次完成抽帧、格式转换、推理、画框和编码。
     // 接收并处理解码器当前可输出的全部视频帧。
-    // is_draining=false：正常处理某个输入 Packet 产生的帧；
-    // is_draining=true：输入结束并发送空 Packet 后，接收解码器内部缓存的剩余帧。
     auto receiveAndProcessDecodedFrames = [&](bool is_draining) -> bool
     {
         while (true)
@@ -607,6 +610,17 @@ bool extractFrames(const std::string &path,// 输入视频路径
                 }
 
                 auto render_scale_started_at = std::chrono::steady_clock::now();
+                
+                // 之前只是准备"帧转换"的上下文，现在进行"转换"
+                /* 两套帧格式，在当前循环步内是同一帧，所以，可以进行两套帧的配合
+                   同一个 decoded_frame 同步转换出的两个版本，他们处于同一次循环步、同一个解码帧的处理分支中
+                   640x640 inference_frame
+                   -> 输入 YOLO
+                   -> 得到 640x640 模型坐标系中的检测框
+                   -> 将坐标缩放回 1920x1080
+                   -> 在 render_frame 上画框
+                */
+
                 // 调用FFmpeg库函数：将解码帧转换为原尺寸但RGB格式(用于在原始尺寸上画框+生成结果视频)
                 sws_scale(sws_context,
                           decoded_frame->data,
@@ -752,8 +766,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
                 return false;
             }
 
-            // 当前 Packet 送入后，接收并处理解码器此时能够输出的全部视频帧。
-            // 由于解码器可能缓存和重排序，这些帧不一定只由当前 Packet 产生，也可能暂时没有帧可取。
+            // 当前Packet送入解码器后，接收并处理解码器此时能够输出的全部视频帧。
             if (!receiveAndProcessDecodedFrames(false))
             {
                 av_packet_unref(packet);
@@ -773,9 +786,10 @@ bool extractFrames(const std::string &path,// 输入视频路径
         return false;
     }
 
+
+    /*排空与收尾-start*/
     // 向解码器发送 nullptr，排空剩余帧
-    // 通知解码器：输入Packet已经全部发送完，请把内部缓存的剩余Frame全部吐出来
-    // 空 Packet 通知解码器输入已经结束，使其输出内部缓存的延迟帧。
+    // 空 Packet 通知解码器输入已经结束，使解码器输出内部剩余还未处理的延迟帧。
     avcodec_send_packet(codec_context, nullptr);
     // 接收并处理解码器排空阶段输出的剩余视频帧。
     if (!receiveAndProcessDecodedFrames(true))
@@ -786,7 +800,7 @@ bool extractFrames(const std::string &path,// 输入视频路径
 
     // 最后额外执行一次avcodec_send_frame(encoder_context, nullptr);+writeEncodedPackets();
     // 用于对编码器内部缓存的数据全部排空
-    // 空 Frame 通知编码器不再有新帧，使其输出内部缓存的延迟编码包。
+    // 空 Frame 通知编码器不再有新帧，使编码器输出内部缓存的延迟编码包。
     if (avcodec_send_frame(encoder_context, nullptr) < 0)
     {
         encode_error_message = "刷新结果视频编码器失败";
@@ -807,11 +821,14 @@ bool extractFrames(const std::string &path,// 输入视频路径
         cleanup();
         return false;
     }
+    
     // 保存帧数和检测数
     result.extracted_frame_count = extracted_index;
     result.total_detection_count = total_detection_count;
     cleanup();
     return true;
+
+    /*排空与收尾-end*/
 }
 }
 

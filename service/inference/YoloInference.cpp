@@ -20,16 +20,18 @@
 
 namespace
 {
+
+// session+一些辅助数据，组成的my_session结构体
 struct CachedOnnxSession
 {
-    std::unique_ptr<Ort::Session> session;
-    std::vector<std::string> input_names;
-    std::vector<std::string> output_names;
-    std::vector<const char *> input_name_ptrs;
-    std::vector<const char *> output_name_ptrs;
-    std::vector<int64_t> input_shape;
-    std::vector<std::vector<int64_t>> output_shapes;
-    std::vector<std::string> class_names;
+    std::unique_ptr<Ort::Session> session; // 真正执行推理的 ONNX Session
+    std::vector<std::string> input_names; // 模型输入节点名称
+    std::vector<std::string> output_names;// 模型输出节点名称
+    std::vector<const char *> input_name_ptrs;// 调用Session::Run使用的输入名称指针
+    std::vector<const char *> output_name_ptrs;// 调用Session::Run使用的输出名称指针
+    std::vector<int64_t> input_shape;// 输入形状
+    std::vector<std::vector<int64_t>> output_shapes;// 输出 Tensor 形状
+    std::vector<std::string> class_names;// 模型的检测类别名称
 };
 
 struct ForwardPassResult
@@ -40,6 +42,7 @@ struct ForwardPassResult
     int output_tensor_count = 0;
 };
 
+// 获取ONNXRuntime的全局运行环境，负责日志及运行时基础资源
 Ort::Env &getOrtEnv()
 {
     static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "VisionInferYoloInference");
@@ -229,13 +232,18 @@ const std::unordered_map<char, std::array<unsigned char, 7>> &getBitmapFont()
     return font;
 }
 
+// 填充(x, y)坐标的颜色
 void setPixel(FrameBuffer &frame, int x, int y, unsigned char r, unsigned char g, unsigned char b)
 {
     if (x < 0 || y < 0 || x >= frame.width || y >= frame.height)
     {
         return;
     }
+    // RGB24格式下，一个像素占3个字节
+    // 像素(x,y)在内存中的首地址
     unsigned char *pixel = frame.data + static_cast<std::ptrdiff_t>(y) * frame.linesize + static_cast<std::ptrdiff_t>(x) * 3;
+    
+    // RGB对应值修改为 形参值
     pixel[0] = r;
     pixel[1] = g;
     pixel[2] = b;
@@ -251,6 +259,7 @@ void fillRect(FrameBuffer &frame, int left, int top, int right, int bottom, unsi
     {
         for (int x = clamped_left; x <= clamped_right; ++x)
         {
+            // 利用该"基础填充方法"进行像素填充
             setPixel(frame, x, y, r, g, b);
         }
     }
@@ -297,6 +306,7 @@ void drawBitmapChar(FrameBuffer &frame,
     }
 }
 
+// 绘制红色背景上的"文字"(使用自带的一个5*7点阵字库)
 void drawText(FrameBuffer &frame,
               int origin_x,
               int origin_y,
@@ -309,11 +319,14 @@ void drawText(FrameBuffer &frame,
     int x = origin_x;
     for (char ch : text)
     {
+        // 读取一个字符的点阵，然后把对应位置设置成白色
         drawBitmapChar(frame, x, origin_y, ch, scale, r, g, b);
+        // 每个字之间的间隔
         x += 6 * scale;
     }
 }
 
+// 获取要画上去的"类别"+"置信度"
 std::string formatDetectionCaption(const DetectionBox &box)
 {
     std::ostringstream oss;
@@ -344,26 +357,34 @@ float intersectionOverUnion(const DetectionBox &a, const DetectionBox &b)
     return inter_area / union_area;
 }
 
+// NMS实现
 std::vector<DetectionBox> applyNms(std::vector<DetectionBox> boxes, float iou_threshold)
 {
+    // 先将"初步检测框集合"按照置信度从高到低排序
     std::sort(boxes.begin(), boxes.end(), [](const DetectionBox &lhs, const DetectionBox &rhs)
               { return lhs.confidence > rhs.confidence; });
 
+    // 准备vector，存储NMS去重之后的"最终检测框集合"
     std::vector<DetectionBox> kept;
     std::vector<bool> removed(boxes.size(), false);
+    // 遍历每个框
     for (std::size_t i = 0; i < boxes.size(); ++i)
     {
+        // 每个被标记的框会被丢弃
         if (removed[i])
         {
             continue;
         }
         kept.push_back(boxes[i]);
+        // 其他框
         for (std::size_t j = i + 1; j < boxes.size(); ++j)
         {
+            // 只有相同类别之间做NMS
             if (removed[j] || boxes[i].label != boxes[j].label)
             {
                 continue;
             }
+            // 如果 IoU 超过阈值，则标记
             if (intersectionOverUnion(boxes[i], boxes[j]) > iou_threshold)
             {
                 removed[j] = true;
@@ -374,42 +395,59 @@ std::vector<DetectionBox> applyNms(std::vector<DetectionBox> boxes, float iou_th
     return kept;
 }
 
+// 获取or创建某个模型的Session实例
 bool getOrCreateOnnxSession(const std::string &model_path,
                             std::shared_ptr<CachedOnnxSession> &cached_session,
                             std::string &message)
 {
     static std::mutex cache_mutex;
+    // session缓存表(用于保存"模型文件路径 -> CachedOnnxSession"的对应信息，一个模型对应一个session)
+    // 因为session很大，尽量做到复用，而不是每次都新创建一个
     static std::unordered_map<std::string, std::shared_ptr<CachedOnnxSession>> cache;
 
+    // 先加锁(因为多个视频处理线程可能同时加载同一个模型，加锁可防止重复创建Session或并发修改缓存)
     std::lock_guard<std::mutex> lock(cache_mutex);
+    // 查缓存表，看当前模型是否已有session
     auto it = cache.find(model_path);
+    // 查到了
     if (it != cache.end())
     {
         cached_session = it->second;
         message = "ONNX Session 复用成功";
         return true;
     }
-
+    // 没查到
     try
     {
+        // 新建一个my_session
         auto holder = std::make_shared<CachedOnnxSession>();
 
+        // session 配置
         Ort::SessionOptions session_options;
         int intra_threads = AppConfig::ONNX_INTRA_OP_THREADS > 0
                                 ? AppConfig::ONNX_INTRA_OP_THREADS
                                 : static_cast<int>(std::max(1u, std::thread::hardware_concurrency() / 2));
         int inter_threads = AppConfig::ONNX_INTER_OP_THREADS > 0 ? AppConfig::ONNX_INTER_OP_THREADS : 1;
+        // 设置算子内部线程数(表示单个算子内部线程数，当前默认1，因为外部有线程池，这里单线程即可)
         session_options.SetIntraOpNumThreads(intra_threads);
+        // 设置算子之间线程数(表示不同算子之间并行执行的线程数量，当前默认1)
         session_options.SetInterOpNumThreads(inter_threads);
+        // 设置"执行模式"(表示计算图中的算子主要按顺序调度)
         session_options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+
+        // 启用ONNX Runtime的全部图优化
         session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
+        // 创建session，放入my_session对应成员变量
         holder->session = std::make_unique<Ort::Session>(getOrtEnv(), model_path.c_str(), session_options);
 
         Ort::AllocatorWithDefaultOptions allocator;
+        // 读取输入数量
         std::size_t input_count = holder->session->GetInputCount();
+        // 读取输出数量
         std::size_t output_count = holder->session->GetOutputCount();
 
+        // 遍历输入节点，保存名称和形状
         for (std::size_t i = 0; i < input_count; ++i)
         {
             auto input_name = holder->session->GetInputNameAllocated(i, allocator);
@@ -513,6 +551,8 @@ ResizeIndexCache &getResizeIndexCache(int source_width, int source_height, int t
     return cache;
 }
 
+
+// RGB图像转为Tensor
 void fillInputTensorFromRgbFrame(const FrameBuffer &frame,
                                  int target_width,
                                  int target_height,
@@ -560,6 +600,7 @@ bool runOnnxForward(const FrameBuffer &frame,
         return false;
     }
 
+    // 先准备形状
     std::vector<int64_t> input_shape = cached_session->input_shape;
     input_shape[0] = 1;
     input_shape[1] = context.input_channels;
@@ -569,7 +610,10 @@ bool runOnnxForward(const FrameBuffer &frame,
     std::vector<float> input_tensor_values;
     fillInputTensorFromRgbFrame(frame, context.input_width, context.input_height, input_tensor_values);
 
+    // 创建CPU内存信息
     Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    
+    // 构造输入Tensor
     Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info,
                                                               input_tensor_values.data(),
                                                               input_tensor_values.size(),
@@ -578,12 +622,14 @@ bool runOnnxForward(const FrameBuffer &frame,
 
     try
     {
-        auto output_tensors = cached_session->session->Run(Ort::RunOptions{nullptr},
-                                                           cached_session->input_name_ptrs.data(),
-                                                           &input_tensor,
-                                                           1,
-                                                           cached_session->output_name_ptrs.data(),
-                                                           cached_session->output_name_ptrs.size());
+        // Session::Run，使用ONNX Session(ONNX Runtime加载并优化模型后得到的、可以反复执行推理的模型运行实例)启动模型推理
+        // 并返回"输出Tensor",output_tensors 仍是模型原始输出，还不是最终检测框，后续需要decodeYoloV8Output()完成置信度过滤、坐标转换和 NMS
+        auto output_tensors = cached_session->session->Run(Ort::RunOptions{nullptr},// 本地运行配置
+                                                           cached_session->input_name_ptrs.data(),// 输入节点名称
+                                                           &input_tensor,// 输入Tensor
+                                                           1,// 输入数量
+                                                           cached_session->output_name_ptrs.data(),// 输出节点数量
+                                                           cached_session->output_name_ptrs.size());// 输出数量
 
         forward_result.success = true;
         forward_result.output_tensor_count = static_cast<int>(output_tensors.size());
@@ -606,25 +652,41 @@ bool runOnnxForward(const FrameBuffer &frame,
     }
 }
 
+
+// yolo后处理：yolo模型原始输出得到的是一组浮点数Tensor-->最终检测框
+/* Tensor
+eg:[1, 84, 8400] 
+1      一张图片
+84     每个候选框有84个数 (其中，前4个:cx, cy, width, height；其他80个:80个类别分数)
+8400   一共有8400个候选框
+其在内存中是一个flaot数组
+
+*/
+// Tensor->候选框(中心点坐标形式，还没框)->置信度过滤 找到类别->坐标转换(由中心点形式变为左上角右下角坐标)并生成"候选检测框"->NMS去重->得到最终检测框
 bool decodeYoloV8Output(const Ort::Value &output_tensor,
                         const FrameBuffer &frame,
                         const InferenceModelContext &context,
                         InferenceResult &result)
 {
+    // 首先检查是不是Tensor
     if (!output_tensor.IsTensor())
     {
         result.runtime_message += "；首个输出不是 Tensor";
         return false;
     }
 
+    // 读取形状到shape(可以用来索引Tensor的各个元素)
     auto tensor_info = output_tensor.GetTensorTypeAndShapeInfo();
     std::vector<int64_t> shape = tensor_info.GetShape();
+
+    // 当前只支持3维输出
     if (shape.size() != 3)
     {
         result.runtime_message += "；首个输出维度不是 3D";
         return false;
     }
 
+    // 读取底层浮点数组(这里的 data 指向模型输出的连续浮点数内存)
     const float *data = output_tensor.GetTensorData<float>();
     if (data == nullptr)
     {
@@ -637,7 +699,15 @@ bool decodeYoloV8Output(const Ort::Value &output_tensor,
     bool transposed_layout = false;
     if (shape[1] > 4 && shape[2] > 4)
     {
-        // 常见 YOLOv8 导出： [1, 84, 8400]
+        // 兼容两种输出布局
+        /*
+        不同 YOLO可能导出两种布局:
+        [1, 84, 8400]或者[1, 8400, 84]
+
+        最终统一成
+        features：每个候选框的特征数量(84)
+        candidates：候选框数量(8400)
+        */
         if (shape[1] <= shape[2])
         {
             features = static_cast<int>(shape[1]);
@@ -659,15 +729,22 @@ bool decodeYoloV8Output(const Ort::Value &output_tensor,
     }
 
     int class_count = features - 4;
+    // 模型上下文有类别名称用模型自己的，没有的话用COCO数据集默认的
     const std::vector<std::string> &class_names = context.class_names.empty()
                                                       ? getCocoClassNames()
                                                       : context.class_names;
+    
+    // 计算缩放比例，后续会用到(原视频长宽/模型输入长宽)
     float scale_x = static_cast<float>(frame.width) / static_cast<float>(context.input_width);
     float scale_y = static_cast<float>(frame.height) / static_cast<float>(context.input_height);
 
+    // "初步检测框集合"
     std::vector<DetectionBox> proposals;
     proposals.reserve(static_cast<std::size_t>(candidates));
 
+    // readValue lambda 用于屏蔽两种内存排列差异
+    // 功能：读取第 candidate_index 个候选框的第 feature_index 个特征
+    // (EG readValue(0, 10): 读取第10个候选框的第0个特征，即中心点横坐标cx)
     auto readValue = [&](int feature_index, int candidate_index) -> float
     {
         if (transposed_layout)
@@ -677,57 +754,74 @@ bool decodeYoloV8Output(const Ort::Value &output_tensor,
         return data[candidate_index * features + feature_index];
     };
 
+    // 遍历候选框（中心点坐标形式）
     for (int i = 0; i < candidates; ++i)
     {
-        float cx = readValue(0, i);
+        // 先读取第 i 个候选框的坐标
+        float cx = readValue(0, i);// 中心点坐标
         float cy = readValue(1, i);
-        float w = readValue(2, i);
+        float w = readValue(2, i);// 框的宽和高
         float h = readValue(3, i);
 
-        int best_class_id = -1;
+        // z找出最高分的类别
+        int best_class_id = -1;// 任务id
         float best_score = 0.0f;
+        
         for (int cls = 0; cls < class_count; ++cls)
         {
+            // 当前候选框的每个类别的下标是:4、5、6、...从4开始，所以加了一个4的偏移
             float score = readValue(4 + cls, i);
-            if (score > best_score)
+            if (score > best_score) // 更新最高分分值
             {
                 best_score = score;
                 best_class_id = cls;
             }
         }
 
+        // 置信度过滤(本次筛选出的类别，对应的分数低于置信度的，直接丢弃)
         if (best_class_id < 0 || best_score < context.confidence_threshold)
         {
             continue;
         }
 
-        float left = (cx - w * 0.5f) * scale_x;
+
+        // 坐标转换与映射(先计算出左上角和右下角坐标，再乘之前计算出来的缩放比例，得到原尺寸的坐标)
+        float left = (cx - w * 0.5f) * scale_x;// 左上
         float top = (cy - h * 0.5f) * scale_y;
-        float right = (cx + w * 0.5f) * scale_x;
+        float right = (cx + w * 0.5f) * scale_x;// 右下
         float bottom = (cy + h * 0.5f) * scale_y;
 
+        // 生成候选 DetectionBox
         DetectionBox box;
-        box.left = std::max(0, static_cast<int>(std::floor(left)));
-        box.top = std::max(0, static_cast<int>(std::floor(top)));
-        box.right = std::min(frame.width - 1, static_cast<int>(std::ceil(right)));
-        box.bottom = std::min(frame.height - 1, static_cast<int>(std::ceil(bottom)));
+        // 限制坐标不能超出图像
+        box.left = std::max(0, static_cast<int>(std::floor(left)));// left不能小于0
+        box.top = std::max(0, static_cast<int>(std::floor(top)));// top不能小于0
+        box.right = std::min(frame.width - 1, static_cast<int>(std::ceil(right)));// right不能超过图像宽度
+        box.bottom = std::min(frame.height - 1, static_cast<int>(std::ceil(bottom)));// bottom不能超过图像高度
         box.confidence = best_score;
         if (best_class_id >= 0 && best_class_id < static_cast<int>(class_names.size()))
         {
+            // 类别名称优先使用模型 metadata
             box.label = class_names[best_class_id];
         }
-        else
+        else// 如果类别 ID 超出范围，再用官方默认名称
         {
             box.label = "class_" + std::to_string(best_class_id);
         }
 
+        // 只有宽高有效的"候选框"才加入"初步检测框集合"
         if (box.right > box.left && box.bottom > box.top)
         {
             proposals.push_back(box);
         }
     }
 
-    std::vector<DetectionBox> detections = applyNms(proposals, 0.45f);
+    // NMS
+    // 同一个目标可能产生多个高度重叠的候选框，如果都保留，画面上同一个人会出现多个重叠框
+    // NMS的作用：保留置信度最高的框，放入返回集合vector
+    std::vector<DetectionBox> detections = applyNms(proposals, 0.45f);// 参数二:IoU阈值(IoU 表示两个框的重叠程度) 
+    
+    // 最终得到去重后的框
     result.boxes = detections;
     result.detection_count = static_cast<int>(detections.size());
 
@@ -740,14 +834,21 @@ bool decodeYoloV8Output(const Ort::Value &output_tensor,
     return true;
 }
 
+// 后处理成功后，在原尺寸帧上画框(可视化)
+// PS:render_frame是引用参数，函数直接修改它指向的 RGB 图像内存，不需要返回一张新图片
 void drawDetectionBox(FrameBuffer &frame, const DetectionBox &box)
 {
+    // 框的边界厚度为四个像素
     int thickness = 4;
+
+    // 遍历整张图
     for (int y = 0; y < frame.height; ++y)
     {
         unsigned char *row = frame.data + y * frame.linesize;
         for (int x = 0; x < frame.width; ++x)
         {
+            // 判断当前像素是否属于框的四条边
+            // 先判断相对位置
             bool is_top_or_bottom = (y >= box.top && y < box.top + thickness) ||
                                     (y <= box.bottom && y > box.bottom - thickness);
             bool is_left_or_right = (x >= box.left && x < box.left + thickness) ||
@@ -755,9 +856,12 @@ void drawDetectionBox(FrameBuffer &frame, const DetectionBox &box)
             bool inside_vertical = (y >= box.top && y <= box.bottom);
             bool inside_horizontal = (x >= box.left && x <= box.right);
 
+            // 位于上边或下边，而且横坐标在框内
+            // 或者
+            // 位于左边或右边，而且纵坐标在框内
             if ((is_top_or_bottom && inside_horizontal) || (is_left_or_right && inside_vertical))
             {
-                // RGB24: red bounding box.
+                // 满足条件的改为红色
                 row[x * 3 + 0] = 255;
                 row[x * 3 + 1] = 0;
                 row[x * 3 + 2] = 0;
@@ -774,7 +878,10 @@ void drawDetectionBox(FrameBuffer &frame, const DetectionBox &box)
     int caption_right = std::min(frame.width - 1, caption_left + caption_width + 3);
     int caption_bottom = std::min(frame.height - 1, caption_top + caption_height);
 
+    // 计算文字区域，绘制红色背景
     fillRect(frame, caption_left, caption_top, caption_right, caption_bottom, 255, 0, 0);
+    
+    // 绘制白色文字
     drawText(frame, caption_left + 2, caption_top + 2, caption, text_scale, 255, 255, 255);
 }
 }
@@ -913,9 +1020,11 @@ bool YoloInference::processFrame(FrameBuffer &render_frame,
 
     bool forward_success = false;
     ForwardPassResult forward_result;
+    // 满足session加载成功(由模型推理上下文的load_success记录) 同时 模型框架为onnx，才可以进行"模型推理"
     if (context.load_success && context.framework == "onnx")
     {
         auto forward_started_at = std::chrono::steady_clock::now();
+
         // runOnnxForward 执行 ONNX 前向推理
         forward_success = runOnnxForward(inference_frame, context, forward_result);
         auto forward_finished_at = std::chrono::steady_clock::now();
@@ -929,23 +1038,31 @@ bool YoloInference::processFrame(FrameBuffer &render_frame,
     result.output_tensor_count = forward_result.output_tensor_count;
     result.runtime_message = forward_result.runtime_message;
     bool decode_success = false;
+
+    // 当前向推理成功，并且，处理结果不为空 时，进行yolo后处理
     if (forward_success && !forward_result.output_tensors.empty())
     {
         auto postprocess_started_at = std::chrono::steady_clock::now();
-        // decodeYoloV8Output 后处理
-        decode_success = decodeYoloV8Output(forward_result.output_tensors[0], render_frame, context, result);
+
+        // decodeYoloV8Output:YOLO后处理(模型输出张量的解析、置信度过滤、坐标还原以及 NMS)
+        decode_success = decodeYoloV8Output(forward_result.output_tensors[0], // ONNX 模型的第一个输出张量
+                                            render_frame, // 原尺寸RGB 视频帧，用于计算坐标映射
+                                            context, // 模型输入尺寸、置信度阈值、类别名称
+                                            result// 保存最终检测框
+                                        );
         auto postprocess_finished_at = std::chrono::steady_clock::now();
         result.postprocess_duration_ms = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(postprocess_finished_at - postprocess_started_at).count());
     }
 
+    // 后处理成功并且"最终检测框集合不为空"
     if (decode_success && !result.boxes.empty())
     {
         auto draw_started_at = std::chrono::steady_clock::now();
         for (const DetectionBox &box : result.boxes)
         {
-            // 在原尺寸帧上画框
-            drawDetectionBox(render_frame, box);
+            // 后处理成功后，在原尺寸帧上画框(可视化)
+            drawDetectionBox(render_frame, box);// 画到render_frame(原尺寸+RGB)上
         }
         auto draw_finished_at = std::chrono::steady_clock::now();
         result.draw_duration_ms = static_cast<std::uint64_t>(

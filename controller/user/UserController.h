@@ -3,7 +3,10 @@
 
 #include "controller/network/Router.h"
 #include "entity/HttpEntity.h"
-
+/*
+网络接入层:http报文字符串分隔成一个结构体，但其内部还是字符串
+Controller:接收http结构体，返回http结构体；将json字符串->C++对象数据(有实际类型)
+*/
 class UserController
 {
 public:

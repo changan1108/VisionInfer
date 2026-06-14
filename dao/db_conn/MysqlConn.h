@@ -4,6 +4,7 @@
 #include <mysql/mysql.h>
 #include <string>
 
+// 单条MYSQL连接类(其对象是某条MYSQL连接)
 class MysqlConn
 {
 public:
@@ -23,7 +24,7 @@ public:
     // 执行查询语句 (Select)
     MYSQL_RES *query(const std::string &sql);
 
-    // 获取最近一次插入的自增主键
+    // 获取刚刚插入的记录的主键
     long long getLastInsertId() const;
 
 private:

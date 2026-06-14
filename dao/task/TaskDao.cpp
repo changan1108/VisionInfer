@@ -95,18 +95,22 @@ bool TaskDao::insertTask(TaskEntity &task)
 
 bool TaskDao::getTaskById(long long task_id, TaskEntity &out_task)
 {
+    // 获取连接池单例，并调用acquire()尝试借出一条连接
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
+    // 生成SELECT SQL
     std::string sql = "SELECT id, task_name, task_type, submitted_by, input_video_path, input_video_id, output_video_path, video_duration, video_width, video_height, video_fps, frame_interval, confidence_threshold, processed_frame_count, detection_count, real_inference_executed, result_video_generated, used_model_name, used_model_framework, video_build_mode, inference_runtime_message, status, result_summary, error_message, model_id, created_at, started_at, finished_at "
                       "FROM tasks WHERE is_deleted = 0 AND id = " +
                       std::to_string(task_id) + ";";
 
+    // 使用借出的"连接对象"，执行sql，并生成结果集：res
     MYSQL_RES *res = db->query(sql);
     if (res == nullptr)
     {
         return false;
     }
 
+    // mysql_fetch_row读取res结果集
     MYSQL_ROW row = mysql_fetch_row(res);
     if (row == nullptr)
     {
@@ -114,10 +118,14 @@ bool TaskDao::getTaskById(long long task_id, TaskEntity &out_task)
         return false;
     }
 
+    // 映射成TaskEntity
     out_task = buildTaskEntityFromRow(row);
 
+    // 释放结果集
     mysql_free_result(res);
     return true;
+
+    // db走出作用域后，由于析构函数，其资源被释放
 }
 
 bool TaskDao::updateTaskStatus(long long task_id, const std::string &status)

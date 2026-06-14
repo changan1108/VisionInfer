@@ -10,8 +10,10 @@
 
 namespace
 {
+// 反序列化:josn字符串->Value对象
 bool parseJsonObjectBody(const std::string &body, Json::Value &root, HttpResponse &res)
 {
+    // 反序列化:josn字符串->Value对象
     Json::Reader reader;
     if (!reader.parse(body, root))
     {

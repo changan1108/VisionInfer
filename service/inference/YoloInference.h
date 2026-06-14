@@ -6,28 +6,29 @@
 #include <string>
 #include <vector>
 
+// 检测框
 struct DetectionBox
 {
-    int left = 0;
+    int left = 0;// 走上角坐标
     int top = 0;
-    int right = 0;
+    int right = 0;// 右下角坐标
     int bottom = 0;
-    std::string label;
-    float confidence = 0.0f;
+    std::string label;// 类别
+    float confidence = 0.0f;// 置信度
 };
 
 struct FrameBuffer
 {
-    int width = 0;
+    int width = 0; // 图像尺寸
     int height = 0;
-    int linesize = 0;
-    unsigned char *data = nullptr;
+    int linesize = 0; // 一行像素数据实际占用的字节数
+    unsigned char *data = nullptr; // RGB 像素内存首地址
 };
 
 struct InferenceResult
 {
     int detection_count = 0;
-    std::vector<DetectionBox> boxes;
+    std::vector<DetectionBox> boxes;// 最终通过筛选的检测框
     std::string model_name;
     std::string model_framework;
     bool real_inference_ran = false;

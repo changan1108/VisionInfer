@@ -25,6 +25,7 @@ std::string escapeSql(const std::string &input)
 // 插入新用户
 bool UserDao::insertUser(const UserEntity &user)
 {
+    // 借出一个线程池连接
     MysqlPool::BorrowedConn db = MysqlPool::instance().acquire();
 
     // 拼接超长 SQL (注意字段顺序)
